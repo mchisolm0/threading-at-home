@@ -274,7 +274,6 @@ async function withTimeout<T>(
       run(controller.signal),
       new Promise<never>((_, reject) => {
         timeout = setTimeout(() => {
-          controller.abort();
           reject(
             new CodexClientError({
               code: "codex_timeout",
@@ -282,6 +281,7 @@ async function withTimeout<T>(
               retryable: true
             })
           );
+          controller.abort();
         }, timeoutMs);
       })
     ]);
@@ -655,7 +655,7 @@ export async function detectCodexCliVersion(input: {
   const spawnProcess = input.spawnProcess ?? defaultSpawner;
 
   return await withTimeout(
-    () =>
+    (signal) =>
       new Promise<string>((resolve, reject) => {
         const process = spawnProcess(codexBin, ["--version"], {
           stdio: "pipe"
@@ -663,6 +663,13 @@ export async function detectCodexCliVersion(input: {
         let stdout = "";
         let stderr = "";
 
+        signal.addEventListener(
+          "abort",
+          () => {
+            process.kill();
+          },
+          { once: true }
+        );
         process.stdout.on("data", (chunk: Buffer | string) => {
           stdout += chunk.toString();
         });
@@ -727,7 +734,19 @@ export function compareVersions(left: string, right: string): number {
     }
   }
 
+  if (isPrereleaseVersion(left) && !isPrereleaseVersion(right)) {
+    return -1;
+  }
+
+  if (!isPrereleaseVersion(left) && isPrereleaseVersion(right)) {
+    return 1;
+  }
+
   return 0;
+}
+
+function isPrereleaseVersion(version: string): boolean {
+  return /^\d+\.\d+\.\d+-/.test(version);
 }
 
 function versionParts(version: string): readonly [number, number, number] {

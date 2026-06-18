@@ -7,6 +7,7 @@ import {
   type CodexProcess,
   compareVersions,
   createCodexAppServerTransport,
+  detectCodexCliVersion,
   parseCodexVersion,
   readCodexAccountState,
   readCodexRateLimits
@@ -57,6 +58,7 @@ class MockCodexProcess extends EventEmitter implements CodexProcess {
   readonly stdout = new PassThrough();
   readonly stderr = new PassThrough();
   readonly stdinLines: unknown[] = [];
+  killed = false;
 
   constructor() {
     super();
@@ -70,6 +72,7 @@ class MockCodexProcess extends EventEmitter implements CodexProcess {
   }
 
   kill(): boolean {
+    this.killed = true;
     this.emit("exit", 0, null);
     return true;
   }
@@ -92,6 +95,8 @@ describe("Codex app-server client", () => {
     expect(compareVersions("0.140.1", "0.140.0")).toBe(1);
     expect(compareVersions("0.139.9", "0.140.0")).toBe(-1);
     expect(compareVersions("0.140.0", "0.140.0")).toBe(0);
+    expect(compareVersions("0.140.0-beta.1", "0.140.0")).toBe(-1);
+    expect(compareVersions("0.140.0", "0.140.0-beta.1")).toBe(1);
   });
 
   it("reads sanitized Codex account state without exposing raw account fields", async () => {
@@ -278,6 +283,24 @@ describe("Codex app-server client", () => {
     ).rejects.toMatchObject({
       code: "codex_timeout"
     });
+  });
+
+  it("kills the version subprocess when version detection times out", async () => {
+    const mockProcess = new MockCodexProcess();
+
+    await expect(
+      detectCodexCliVersion({
+        timeoutMs: 1,
+        spawnProcess(command, args) {
+          expect(command).toBe("codex");
+          expect(args).toEqual(["--version"]);
+          return mockProcess;
+        }
+      })
+    ).rejects.toMatchObject({
+      code: "codex_timeout"
+    });
+    expect(mockProcess.killed).toBe(true);
   });
 
   it("sends and receives app-server JSONL without requiring a live Codex process", async () => {
