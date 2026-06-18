@@ -1,16 +1,22 @@
 import { EventEmitter } from "node:events";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 import {
   CodexClientError,
+  CodexExecError,
   type CodexAppServerTransport,
   type CodexProcess,
   compareVersions,
   createCodexAppServerTransport,
   detectCodexCliVersion,
+  parseCodexExecEvent,
   parseCodexVersion,
   readCodexAccountState,
-  readCodexRateLimits
+  readCodexRateLimits,
+  runCodexExec
 } from "../src/index.js";
 
 class FakeTransport implements CodexAppServerTransport {
@@ -78,7 +84,7 @@ class MockCodexProcess extends EventEmitter implements CodexProcess {
   }
 
   override on(
-    event: "error" | "exit",
+    event: "close" | "error" | "exit",
     listener: (errorOrCode: Error | number | null, signal?: NodeJS.Signals | null) => void
   ): this {
     return super.on(event, listener);
@@ -393,5 +399,319 @@ describe("Codex app-server client", () => {
     });
     await expect(response).rejects.not.toThrow("secret-from-codex");
     await transport.close();
+  });
+});
+
+describe("Codex exec runner", () => {
+  it("spawns codex exec with JSONL, ephemeral, schema, and structured output flags", async () => {
+    const mockProcess = new MockCodexProcess();
+    const tempDir = await mkdtemp(join(tmpdir(), "oss-capacity-codex-test-"));
+    const schemaPath = join(tempDir, "schema.json");
+    const outputPath = join(tempDir, "result.json");
+    const cwd = tempDir;
+    let markSpawned: () => void = () => {};
+    const spawned = new Promise<void>((resolve) => {
+      markSpawned = resolve;
+    });
+    await writeFile(schemaPath, "{}\n", "utf8");
+    await writeFile(
+      outputPath,
+      `${JSON.stringify({ status: "ok", summary: "ready" })}\n`,
+      "utf8"
+    );
+
+    const resultPromise = runCodexExec({
+      prompt: "Summarize the task",
+      cwd,
+      outputSchema: { path: schemaPath },
+      structuredOutputPath: outputPath,
+      sandbox: "read-only",
+      model: "gpt-5",
+      config: {
+        "shell_environment_policy.inherit": "none"
+      },
+      versionDetector,
+      spawnProcess(command, args, spawnOptions) {
+        markSpawned();
+        expect(command).toBe("codex");
+        expect(args).toEqual([
+          "exec",
+          "--json",
+          "--ephemeral",
+          "--cd",
+          cwd,
+          "--sandbox",
+          "read-only",
+          "--model",
+          "gpt-5",
+          "--config",
+          'shell_environment_policy.inherit="none"',
+          "--output-schema",
+          schemaPath,
+          "--output-last-message",
+          outputPath,
+          "Summarize the task"
+        ]);
+        expect(spawnOptions).toMatchObject({
+          cwd,
+          stdio: "pipe"
+        });
+        return mockProcess;
+      }
+    });
+    await spawned;
+
+    mockProcess.stdout.write(
+      `${JSON.stringify({
+        type: "thread.started",
+        thread_id: "thread-local"
+      })}\n`
+    );
+    mockProcess.stdout.write(
+      `${JSON.stringify({
+        type: "turn.completed",
+        usage: {
+          input_tokens: 12,
+          output_tokens: 8,
+          total_tokens: 20
+        },
+        final_response: "raw event final"
+      })}\n`
+    );
+    mockProcess.emit("close", 0, null);
+
+    await expect(resultPromise).resolves.toMatchObject({
+      codexCliVersion: "0.140.0",
+      finalMessage: `${JSON.stringify({ status: "ok", summary: "ready" })}\n`,
+      structuredOutput: {
+        path: outputPath,
+        json: {
+          status: "ok",
+          summary: "ready"
+        }
+      },
+      usage: {
+        inputTokens: 12,
+        outputTokens: 8,
+        totalTokens: 20
+      },
+      exitCode: 0
+    });
+  });
+
+  it("waits for close before resolving final exec output", async () => {
+    const mockProcess = new MockCodexProcess();
+    let markSpawned: () => void = () => {};
+    const spawned = new Promise<void>((resolve) => {
+      markSpawned = resolve;
+    });
+    const resultPromise = runCodexExec({
+      prompt: "Capture late output",
+      versionDetector,
+      spawnProcess() {
+        markSpawned();
+        return mockProcess;
+      }
+    });
+
+    await spawned;
+    mockProcess.emit("exit", 0, null);
+    mockProcess.stdout.write(
+      `${JSON.stringify({
+        type: "turn.completed",
+        final_response: "late final response"
+      })}\n`
+    );
+    mockProcess.emit("close", 0, null);
+
+    await expect(resultPromise).resolves.toMatchObject({
+      finalMessage: "late final response"
+    });
+  });
+
+  it("parses JSONL events into narrow sanitized event records", () => {
+    expect(
+      parseCodexExecEvent(
+        JSON.stringify({
+          type: "item.completed",
+          item: {
+            type: "message",
+            role: "assistant",
+            content: [{ text: "done" }],
+            apiToken: "secret"
+          },
+          rawLocalPath: "/Users/example/.codex/auth.json"
+        })
+      )
+    ).toEqual({
+      type: "item.completed",
+      threadId: undefined,
+      turnId: undefined,
+      itemType: "message",
+      usage: undefined,
+      finalMessage: "done",
+      structuredOutputPath: undefined
+    });
+  });
+
+  it("wraps invalid exec JSONL without echoing raw output", () => {
+    expect(() => parseCodexExecEvent("token=super-secret")).toThrow(CodexClientError);
+    expect(() => parseCodexExecEvent("token=super-secret")).not.toThrow("super-secret");
+  });
+
+  it("kills codex exec on timeout", async () => {
+    const mockProcess = new MockCodexProcess();
+
+    await expect(
+      runCodexExec({
+        prompt: "Hang",
+        timeoutMs: 1,
+        versionDetector,
+        spawnProcess() {
+          return mockProcess;
+        }
+      })
+    ).rejects.toMatchObject({
+      code: "codex_timeout",
+      retryable: true
+    });
+    expect(mockProcess.killed).toBe(true);
+  });
+
+  it("kills codex exec on cancellation", async () => {
+    const mockProcess = new MockCodexProcess();
+    const controller = new AbortController();
+    let markSpawned: () => void = () => {};
+    const spawned = new Promise<void>((resolve) => {
+      markSpawned = resolve;
+    });
+    const resultPromise = runCodexExec({
+      prompt: "Cancel",
+      versionDetector,
+      signal: controller.signal,
+      spawnProcess() {
+        markSpawned();
+        return mockProcess;
+      }
+    });
+
+    await spawned;
+    controller.abort();
+
+    await expect(resultPromise).rejects.toMatchObject({
+      code: "codex_cancelled",
+      retryable: true
+    });
+    expect(mockProcess.killed).toBe(true);
+  });
+
+  it("cancels and kills version detection before spawning exec", async () => {
+    const versionProcess = new MockCodexProcess();
+    const controller = new AbortController();
+    let execSpawned = false;
+    let markVersionSpawned: () => void = () => {};
+    const versionSpawned = new Promise<void>((resolve) => {
+      markVersionSpawned = resolve;
+    });
+    const resultPromise = runCodexExec({
+      prompt: "Cancel during version detection",
+      signal: controller.signal,
+      versionDetector: async (input) =>
+        await detectCodexCliVersion({
+          codexBin: input.codexBin,
+          timeoutMs: input.timeoutMs,
+          signal: input.signal,
+          spawnProcess() {
+            markVersionSpawned();
+            return versionProcess;
+          }
+        }),
+      spawnProcess() {
+        execSpawned = true;
+        return new MockCodexProcess();
+      }
+    });
+
+    await versionSpawned;
+    controller.abort();
+
+    await expect(resultPromise).rejects.toBeInstanceOf(CodexExecError);
+    await expect(resultPromise).rejects.toMatchObject({
+      code: "codex_cancelled",
+      retryable: true
+    });
+    expect(versionProcess.killed).toBe(true);
+    expect(execSpawned).toBe(false);
+  });
+
+  it("reports cancellation when version detection rejects with AbortError", async () => {
+    const controller = new AbortController();
+    let execSpawned = false;
+    let markVersionStarted: () => void = () => {};
+    const versionStarted = new Promise<void>((resolve) => {
+      markVersionStarted = resolve;
+    });
+    const resultPromise = runCodexExec({
+      prompt: "Cancel cooperative detector",
+      signal: controller.signal,
+      versionDetector: async (input) =>
+        await new Promise<string>((_resolve, reject) => {
+          markVersionStarted();
+          input.signal?.addEventListener("abort", () => {
+            const abortError = new Error("aborted");
+            abortError.name = "AbortError";
+            reject(abortError);
+          });
+        }),
+      spawnProcess() {
+        execSpawned = true;
+        return new MockCodexProcess();
+      }
+    });
+
+    await versionStarted;
+    controller.abort();
+
+    await expect(resultPromise).rejects.toMatchObject({
+      code: "codex_cancelled",
+      retryable: true
+    });
+    expect(execSpawned).toBe(false);
+  });
+
+  it("captures sanitized stderr logs on failed exec", async () => {
+    const mockProcess = new MockCodexProcess();
+    let markSpawned: () => void = () => {};
+    const spawned = new Promise<void>((resolve) => {
+      markSpawned = resolve;
+    });
+    const resultPromise = runCodexExec({
+      prompt: "Fail",
+      versionDetector,
+      spawnProcess() {
+        markSpawned();
+        return mockProcess;
+      }
+    });
+
+    await spawned;
+    mockProcess.stderr.write(
+      "Bearer secret-token token=another-secret /Users/example/.codex/auth.json\n"
+    );
+    mockProcess.emit("close", 1, null);
+
+    await expect(resultPromise).rejects.toBeInstanceOf(CodexExecError);
+    await expect(resultPromise).rejects.toMatchObject({
+      code: "codex_exec_failed",
+      message: "Codex exec failed with exit code 1",
+      logs: [
+        {
+          stream: "stderr",
+          message: "Bearer [redacted] token=[redacted] [codex-home]"
+        }
+      ]
+    });
+    await expect(resultPromise).rejects.not.toThrow("secret-token");
+    await expect(resultPromise).rejects.not.toThrow("auth.json");
   });
 });
