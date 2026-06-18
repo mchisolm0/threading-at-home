@@ -12,6 +12,7 @@
     "@auth/core": "0.41.1",
     "@convex-dev/auth": "^0.0.94",
     "@oss-capacity/core": "workspace:*",
+    "@oss-capacity/github": "workspace:*",
     "convex": "^1.24.8"
   }
 }

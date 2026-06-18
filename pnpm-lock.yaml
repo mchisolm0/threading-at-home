@@ -80,6 +80,9 @@ importers:
       '@oss-capacity/core':
         specifier: workspace:*
         version: link:../packages/core
+      '@oss-capacity/github':
+        specifier: workspace:*
+        version: link:../packages/github
       convex:
         specifier: ^1.24.8
         version: 1.41.0(react@19.2.7)

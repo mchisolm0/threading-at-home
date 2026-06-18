@@ -108,7 +108,8 @@ export default defineSchema({
     updatedAt: v.string()
   })
     .index("by_installation_id", ["installationId"])
-    .index("by_account_login", ["accountLogin"]),
+    .index("by_account_login", ["accountLogin"])
+    .index("by_installed_user_status", ["installedByUserId", "status"]),
 
   taskRequests: defineTable({
     id: v.string(),

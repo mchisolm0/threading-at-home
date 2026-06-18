@@ -56,3 +56,10 @@ Run the runner placeholder:
 ```sh
 pnpm --filter @oss-capacity/runner dev
 ```
+
+## GitHub App Installation Verification
+
+Project registration requires a GitHub App installation in addition to GitHub
+OAuth sign-in. Configure the app id, private key, webhook secret, webhook URL,
+installation URL, and required permissions using
+[docs/github-app-configuration.md](docs/github-app-configuration.md).
