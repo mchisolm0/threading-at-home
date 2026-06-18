@@ -1,0 +1,22 @@
+{
+  "name": "@oss-capacity/runner",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "oss-capacity-runner": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "lint": "eslint .",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@oss-capacity/core": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.3"
+  }
+}

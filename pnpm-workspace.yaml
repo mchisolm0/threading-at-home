@@ -1,0 +1,14 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+  - "convex"
+
+onlyBuiltDependencies:
+  - esbuild
+  - sharp
+allowBuilds:
+  esbuild: true
+  sharp: true
+overrides:
+  postcss: 8.5.15
+  ws: 8.21.0

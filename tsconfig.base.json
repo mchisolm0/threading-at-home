@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "allowSyntheticDefaultImports": true,
+    "baseUrl": ".",
+    "declaration": true,
+    "declarationMap": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmitOnError": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "paths": {
+      "@oss-capacity/codex": ["packages/codex/src/index.ts"],
+      "@oss-capacity/core": ["packages/core/src/index.ts"],
+      "@oss-capacity/github": ["packages/github/src/index.ts"]
+    },
+    "target": "ES2022"
+  }
+}
