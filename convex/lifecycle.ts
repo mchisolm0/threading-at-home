@@ -8,6 +8,7 @@ import {
   type TaskLease,
   type TaskRequest
 } from "@oss-capacity/core";
+import { getAuthUserId } from "@convex-dev/auth/server";
 import {
   type IndexRangeBuilder,
   internalMutationGeneric,
@@ -49,6 +50,24 @@ const defaultCleanupBatchSize = 100;
 const maximumCleanupBatchSize = 500;
 const defaultStaleRunAgeMs = 60 * 60 * 1000;
 const nonTerminalCleanupStatuses = ["queued", "leased", "running"] as const;
+
+async function requireAuthenticatedUser(
+  ctx: MutationCtx
+): Promise<StoredDoc & { readonly userId: string }> {
+  const authUserId = await getAuthUserId(ctx);
+
+  if (authUserId === null) {
+    throw new Error("Authentication required");
+  }
+
+  const user = (await ctx.db.get(authUserId)) as StoredDoc | null;
+
+  if (user === null || typeof user.userId !== "string") {
+    throw new Error("Authenticated user record was not found");
+  }
+
+  return user as StoredDoc & { readonly userId: string };
+}
 
 async function uniqueByIndex<T extends StoredDoc>(
   ctx: MutationCtx,
@@ -410,7 +429,12 @@ export const createTask = mutation({
     task: v.any()
   },
   handler: async (ctx, args) => {
-    const task = parseTaskRequest(args.task);
+    const actor = await requireAuthenticatedUser(ctx);
+    const parsedTask = parseTaskRequest(args.task);
+    const task = {
+      ...parsedTask,
+      createdByUserId: actor.userId
+    } satisfies TaskRequest;
     const existing = await uniqueByIndex<StoredDoc>(
       ctx,
       "taskRequests",
@@ -430,7 +454,7 @@ export const createTask = mutation({
       entityId: task.id,
       projectId: task.projectId,
       taskRequestId: task.id,
-      actorUserId: task.createdByUserId,
+      actorUserId: actor.userId,
       occurredAt: task.createdAt,
       metadata: { status: task.status }
     });
@@ -442,11 +466,20 @@ export const createTask = mutation({
 export const activateTask = mutation({
   args: {
     taskRequestId: v.string(),
-    actorUserId: v.string(),
+    actorUserId: v.optional(v.string()),
     now: v.string()
   },
   handler: async (ctx, args) => {
+    const actor = await requireAuthenticatedUser(ctx);
     const now = requireIsoNow(args.now);
+
+    if (
+      args.actorUserId !== undefined &&
+      args.actorUserId !== actor.userId
+    ) {
+      throw new Error("Actor does not match authenticated user");
+    }
+
     const task = await uniqueByIndex<StoredDoc>(
       ctx,
       "taskRequests",
@@ -465,6 +498,10 @@ export const activateTask = mutation({
       throw new Error(`Cannot activate ${parsedTask.status} task`);
     }
 
+    if (parsedTask.createdByUserId !== actor.userId) {
+      throw new Error("Only the task creator can activate this task");
+    }
+
     if (parsedTask.expiresAt !== undefined && Date.parse(parsedTask.expiresAt) <= Date.parse(now)) {
       throw new Error("Cannot activate an expired task request");
     }
@@ -476,7 +513,7 @@ export const activateTask = mutation({
       entityId: parsedTask.id,
       projectId: parsedTask.projectId,
       taskRequestId: parsedTask.id,
-      actorUserId: args.actorUserId,
+      actorUserId: actor.userId,
       occurredAt: now
     });
 
@@ -489,7 +526,12 @@ export const registerRunner = mutation({
     runner: v.any()
   },
   handler: async (ctx, args) => {
-    const runner = parseRunnerCapability(args.runner);
+    const actor = await requireAuthenticatedUser(ctx);
+    const parsedRunner = parseRunnerCapability(args.runner);
+    const runner = {
+      ...parsedRunner,
+      volunteerUserId: actor.userId
+    } satisfies RunnerCapability;
     const existing = await uniqueByIndex<StoredDoc>(
       ctx,
       "runnerRegistrations",
@@ -497,6 +539,13 @@ export const registerRunner = mutation({
       "runnerId",
       runner.runnerId
     );
+
+    if (
+      existing !== null &&
+      existing.volunteerUserId !== actor.userId
+    ) {
+      throw new Error("Runner does not belong to authenticated user");
+    }
 
     if (existing === null) {
       await ctx.db.insert("runnerRegistrations", runner);
@@ -508,7 +557,7 @@ export const registerRunner = mutation({
       eventType: existing === null ? "runner.registered" : "runner.updated",
       entityType: "runnerRegistration",
       entityId: runner.runnerId,
-      actorUserId: runner.volunteerUserId,
+      actorUserId: actor.userId,
       runnerId: runner.runnerId,
       occurredAt: runner.lastSeenAt,
       metadata: {
@@ -534,8 +583,13 @@ export const leaseTask = mutation({
     taskRequestId: v.optional(v.string())
   },
   handler: async (ctx, args) => {
+    const actor = await requireAuthenticatedUser(ctx);
     const now = requireIsoNow(args.now);
     requireIsoNow(args.expiresAt);
+
+    if (args.volunteerUserId !== actor.userId) {
+      throw new Error("Volunteer does not match authenticated user");
+    }
 
     if (Date.parse(args.expiresAt) <= Date.parse(now)) {
       throw new Error("Lease expiration must be after now");
@@ -555,8 +609,8 @@ export const leaseTask = mutation({
 
     const runner = parseRunnerCapability(withoutSystemFields(runnerDoc));
 
-    if (runner.volunteerUserId !== args.volunteerUserId) {
-      throw new Error("Runner does not belong to volunteer");
+    if (runner.volunteerUserId !== actor.userId) {
+      throw new Error("Runner does not belong to authenticated user");
     }
 
     const existingLease = await uniqueByIndex<StoredDoc>(
@@ -642,6 +696,7 @@ export const heartbeatLease = mutation({
     expiresAt: v.optional(v.string())
   },
   handler: async (ctx, args) => {
+    const actor = await requireAuthenticatedUser(ctx);
     const now = requireIsoNow(args.now);
     const nextExpiresAt = args.expiresAt ?? undefined;
 
@@ -665,6 +720,10 @@ export const heartbeatLease = mutation({
 
     if (lease.runnerId !== args.runnerId) {
       throw new Error("Lease does not belong to runner");
+    }
+
+    if (lease.volunteerUserId !== actor.userId) {
+      throw new Error("Lease does not belong to authenticated user");
     }
 
     if (lease.status !== "active") {
@@ -704,7 +763,8 @@ export const heartbeatLease = mutation({
 async function writeTerminalResult(
   ctx: MutationCtx,
   resultPackage: ResultPackage,
-  now: string
+  now: string,
+  actorUserId: string
 ): Promise<ResultPackage> {
   const runDoc = await uniqueByIndex<StoredDoc>(
     ctx,
@@ -736,6 +796,10 @@ async function writeTerminalResult(
 
   const lease = parseTaskLease(withoutSystemFields(leaseDoc));
   assertLeaseCanReceiveTerminalResult(lease, now, resultPackage.completedAt);
+
+  if (lease.volunteerUserId !== actorUserId) {
+    throw new Error("Lease does not belong to authenticated user");
+  }
 
   if (
     lease.runId !== resultPackage.runId ||
@@ -783,7 +847,7 @@ async function writeTerminalResult(
     taskRequestId: resultPackage.taskRequestId,
     runId: resultPackage.runId,
     leaseId: resultPackage.leaseId,
-    actorUserId: resultPackage.volunteerUserId,
+    actorUserId,
     runnerId: resultPackage.runnerId,
     occurredAt: resultPackage.completedAt,
     metadata: { resultPackageId: resultPackage.resultPackageId }
@@ -798,11 +862,12 @@ export const completeRun = mutation({
     now: v.string()
   },
   handler: async (ctx, args) => {
+    const actor = await requireAuthenticatedUser(ctx);
     const now = requireIsoNow(args.now);
     const resultPackage = parseResultPackage(args.resultPackage);
     assertTerminalResultPackage(resultPackage, "completed");
 
-    return await writeTerminalResult(ctx, resultPackage, now);
+    return await writeTerminalResult(ctx, resultPackage, now, actor.userId);
   }
 });
 
@@ -812,11 +877,12 @@ export const failRun = mutation({
     now: v.string()
   },
   handler: async (ctx, args) => {
+    const actor = await requireAuthenticatedUser(ctx);
     const now = requireIsoNow(args.now);
     const resultPackage = parseResultPackage(args.resultPackage);
     assertTerminalResultPackage(resultPackage, "failed");
 
-    return await writeTerminalResult(ctx, resultPackage, now);
+    return await writeTerminalResult(ctx, resultPackage, now, actor.userId);
   }
 });
 
@@ -826,6 +892,7 @@ export const expireLease = mutation({
     now: v.string()
   },
   handler: async (ctx, args) => {
+    const actor = await requireAuthenticatedUser(ctx);
     const now = requireIsoNow(args.now);
     const leaseDoc = await uniqueByIndex<StoredDoc>(
       ctx,
@@ -840,6 +907,10 @@ export const expireLease = mutation({
     }
 
     const lease = parseTaskLease(withoutSystemFields(leaseDoc));
+
+    if (lease.volunteerUserId !== actor.userId) {
+      throw new Error("Lease does not belong to authenticated user");
+    }
 
     if (!shouldExpireLease(lease, now)) {
       return { expired: false, lease };

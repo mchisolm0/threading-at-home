@@ -1,5 +1,6 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
+import { authTables } from "@convex-dev/auth/server";
 
 const jsonValue = v.any();
 
@@ -60,15 +61,25 @@ const resultError = v.object({
 });
 
 export default defineSchema({
+  ...authTables,
+
   users: defineTable({
     userId: v.string(),
     githubUserId: v.optional(v.string()),
     githubLogin: v.optional(v.string()),
     displayName: v.optional(v.string()),
     email: v.optional(v.string()),
+    name: v.optional(v.string()),
+    image: v.optional(v.string()),
+    emailVerificationTime: v.optional(v.number()),
+    phone: v.optional(v.string()),
+    phoneVerificationTime: v.optional(v.number()),
+    isAnonymous: v.optional(v.boolean()),
     createdAt: v.string(),
     updatedAt: v.string()
   })
+    .index("email", ["email"])
+    .index("phone", ["phone"])
     .index("by_user_id", ["userId"])
     .index("by_github_user_id", ["githubUserId"])
     .index("by_github_login", ["githubLogin"]),
