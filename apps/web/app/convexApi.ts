@@ -1,4 +1,5 @@
 import { makeFunctionReference } from "convex/server";
+import type { TaskRequest } from "@oss-capacity/core";
 
 export type Viewer = {
   readonly userId: string;
@@ -61,5 +62,32 @@ export const convexApi = {
       { repositoryFullName: string },
       ProjectView
     >("github:registerProject")
+  },
+  lifecycle: {
+    myTasks: makeFunctionReference<
+      "query",
+      { projectId?: string },
+      TaskRequest[]
+    >("lifecycle:myTasks"),
+    taskDetail: makeFunctionReference<
+      "query",
+      { taskRequestId: string },
+      TaskRequest | null
+    >("lifecycle:taskDetail"),
+    createTask: makeFunctionReference<
+      "mutation",
+      { task: TaskRequest },
+      TaskRequest
+    >("lifecycle:createTask"),
+    activateTask: makeFunctionReference<
+      "mutation",
+      { taskRequestId: string; actorUserId?: string; now: string },
+      TaskRequest
+    >("lifecycle:activateTask"),
+    archiveTask: makeFunctionReference<
+      "mutation",
+      { taskRequestId: string; now: string },
+      TaskRequest
+    >("lifecycle:archiveTask")
   }
 };
