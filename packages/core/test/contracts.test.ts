@@ -106,6 +106,29 @@ describe("shared domain contracts", () => {
     );
   });
 
+  it("rejects cyclic output schemas without throwing", () => {
+    const cyclic: Record<string, unknown> = {
+      type: "object",
+      properties: {}
+    };
+    (cyclic.properties as Record<string, unknown>).self = cyclic;
+
+    let result: ReturnType<typeof validateTaskRequest> | undefined;
+
+    expect(() => {
+      result = validateTaskRequest({
+        ...exampleTaskRequest,
+        outputSchema: cyclic
+      });
+    }).not.toThrow();
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        success: false
+      })
+    );
+  });
+
   it("rejects capacity policy percentages outside 0-100", () => {
     const result = validateVolunteerPolicy({
       ...exampleVolunteerPolicy,

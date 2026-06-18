@@ -151,7 +151,23 @@ function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isJsonValue(value: unknown): value is JsonValue {
+function withTrackedValue(
+  value: object,
+  seen: Set<unknown>,
+  validate: () => boolean
+): boolean {
+  if (seen.has(value)) {
+    return false;
+  }
+
+  seen.add(value);
+  const isValid = validate();
+  seen.delete(value);
+
+  return isValid;
+}
+
+function isJsonValue(value: unknown, seen = new Set<unknown>()): value is JsonValue {
   if (
     value === null ||
     typeof value === "string" ||
@@ -162,11 +178,15 @@ function isJsonValue(value: unknown): value is JsonValue {
   }
 
   if (Array.isArray(value)) {
-    return value.every(isJsonValue);
+    return withTrackedValue(value, seen, () =>
+      value.every((item) => isJsonValue(item, seen))
+    );
   }
 
   if (isJsonObject(value)) {
-    return Object.values(value).every(isJsonValue);
+    return withTrackedValue(value, seen, () =>
+      Object.values(value).every((item) => isJsonValue(item, seen))
+    );
   }
 
   return false;
@@ -189,20 +209,35 @@ function isJsonSchemaType(value: unknown): boolean {
   return false;
 }
 
-function isJsonSchemaArray(value: unknown): value is readonly JsonObject[] {
-  return Array.isArray(value) && value.length > 0 && value.every(isJsonSchema);
+function isJsonSchemaArray(
+  value: unknown,
+  seen: Set<unknown>
+): value is readonly JsonObject[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every((item) => isJsonSchema(item, seen))
+  );
 }
 
-function isJsonSchema(value: unknown): value is JsonObject {
+function isJsonSchema(value: unknown, seen = new Set<unknown>()): value is JsonObject {
   if (!isJsonObject(value)) {
     return false;
   }
 
+  if (seen.has(value)) {
+    return false;
+  }
+
+  seen.add(value);
+
   if (!jsonSchemaRecognizedKeys.some((key) => hasOwnKey(value, key))) {
+    seen.delete(value);
     return false;
   }
 
   if (hasOwnKey(value, "type") && !isJsonSchemaType(value.type)) {
+    seen.delete(value);
     return false;
   }
 
@@ -211,59 +246,75 @@ function isJsonSchema(value: unknown): value is JsonObject {
     (!Array.isArray(value.required) ||
       !value.required.every((item) => typeof item === "string" && item.length > 0))
   ) {
+    seen.delete(value);
     return false;
   }
 
   if (
     hasOwnKey(value, "properties") &&
     (!isJsonObject(value.properties) ||
-      !Object.values(value.properties).every(isJsonSchema))
+      !Object.values(value.properties).every((item) => isJsonSchema(item, seen)))
   ) {
+    seen.delete(value);
     return false;
   }
 
   if (
     hasOwnKey(value, "items") &&
     !(
-      isJsonSchema(value.items) ||
-      (Array.isArray(value.items) && value.items.length > 0 && value.items.every(isJsonSchema))
+      isJsonSchema(value.items, seen) ||
+      (Array.isArray(value.items) &&
+        value.items.length > 0 &&
+        value.items.every((item) => isJsonSchema(item, seen)))
     )
   ) {
+    seen.delete(value);
     return false;
   }
 
   if (
     hasOwnKey(value, "additionalProperties") &&
     typeof value.additionalProperties !== "boolean" &&
-    !isJsonSchema(value.additionalProperties)
+    !isJsonSchema(value.additionalProperties, seen)
   ) {
+    seen.delete(value);
     return false;
   }
 
   if (
     hasOwnKey(value, "enum") &&
-    (!Array.isArray(value.enum) || value.enum.length === 0 || !value.enum.every(isJsonValue))
+    (!Array.isArray(value.enum) ||
+      value.enum.length === 0 ||
+      !value.enum.every((item) => isJsonValue(item, seen)))
   ) {
+    seen.delete(value);
     return false;
   }
 
-  if (hasOwnKey(value, "const") && !isJsonValue(value.const)) {
+  if (hasOwnKey(value, "const") && !isJsonValue(value.const, seen)) {
+    seen.delete(value);
     return false;
   }
 
-  if (hasOwnKey(value, "oneOf") && !isJsonSchemaArray(value.oneOf)) {
+  if (hasOwnKey(value, "oneOf") && !isJsonSchemaArray(value.oneOf, seen)) {
+    seen.delete(value);
     return false;
   }
 
-  if (hasOwnKey(value, "anyOf") && !isJsonSchemaArray(value.anyOf)) {
+  if (hasOwnKey(value, "anyOf") && !isJsonSchemaArray(value.anyOf, seen)) {
+    seen.delete(value);
     return false;
   }
 
-  if (hasOwnKey(value, "allOf") && !isJsonSchemaArray(value.allOf)) {
+  if (hasOwnKey(value, "allOf") && !isJsonSchemaArray(value.allOf, seen)) {
+    seen.delete(value);
     return false;
   }
 
-  return Object.values(value).every(isJsonValue);
+  const isValid = Object.values(value).every((item) => isJsonValue(item, seen));
+  seen.delete(value);
+
+  return isValid;
 }
 
 export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
