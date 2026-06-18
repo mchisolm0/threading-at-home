@@ -14,7 +14,9 @@ import {
   internalMutationGeneric,
   mutationGeneric,
   type GenericDataModel,
-  type GenericMutationCtx
+  type GenericMutationCtx,
+  type GenericQueryCtx,
+  queryGeneric
 } from "convex/server";
 import { v, type GenericId, type Value } from "convex/values";
 
@@ -28,6 +30,7 @@ import {
 } from "./lifecycleLogic.js";
 
 type MutationCtx = GenericMutationCtx<GenericDataModel>;
+type QueryCtx = GenericQueryCtx<GenericDataModel>;
 type StoredDoc = {
   readonly _id: GenericId<string>;
   readonly [key: string]: Value;
@@ -46,13 +49,14 @@ type VolunteerProjectSubscriptionIndexDocument = Record<
 
 const mutation = mutationGeneric;
 const internalMutation = internalMutationGeneric;
+const query = queryGeneric;
 const defaultCleanupBatchSize = 100;
 const maximumCleanupBatchSize = 500;
 const defaultStaleRunAgeMs = 60 * 60 * 1000;
 const nonTerminalCleanupStatuses = ["queued", "leased", "running"] as const;
 
 async function requireAuthenticatedUser(
-  ctx: MutationCtx
+  ctx: MutationCtx | QueryCtx
 ): Promise<StoredDoc & { readonly userId: string }> {
   const authUserId = await getAuthUserId(ctx);
 
@@ -69,8 +73,61 @@ async function requireAuthenticatedUser(
   return user as StoredDoc & { readonly userId: string };
 }
 
+async function requireMaintainerProject(
+  ctx: MutationCtx | QueryCtx,
+  projectId: string,
+  actorUserId: string
+): Promise<StoredDoc> {
+  const project = await uniqueByIndex<StoredDoc>(
+    ctx,
+    "projects",
+    "by_project_id",
+    "projectId",
+    projectId
+  );
+
+  if (project === null) {
+    throw new Error(`Project not found: ${projectId}`);
+  }
+
+  if (project.createdByUserId !== actorUserId) {
+    throw new Error("Only the project maintainer can manage its tasks");
+  }
+
+  if (project.status !== "verified") {
+    throw new Error("Project must be verified before tasks can be managed");
+  }
+
+  return project;
+}
+
+async function verifiedProject(
+  ctx: MutationCtx | QueryCtx,
+  projectId: string
+): Promise<StoredDoc | null> {
+  const project = await uniqueByIndex<StoredDoc>(
+    ctx,
+    "projects",
+    "by_project_id",
+    "projectId",
+    projectId
+  );
+
+  return project?.status === "verified" ? project : null;
+}
+
+async function isVerifiedMaintainerProject(
+  ctx: MutationCtx | QueryCtx,
+  projectId: string,
+  actorUserId: string
+): Promise<boolean> {
+  const project = await verifiedProject(ctx, projectId);
+
+  return project?.createdByUserId === actorUserId;
+}
+
 async function uniqueByIndex<T extends StoredDoc>(
-  ctx: MutationCtx,
+  ctx: MutationCtx | QueryCtx,
   table: string,
   indexName: string,
   field: string,
@@ -83,7 +140,7 @@ async function uniqueByIndex<T extends StoredDoc>(
 }
 
 async function collectByIndex<T extends StoredDoc>(
-  ctx: MutationCtx,
+  ctx: MutationCtx | QueryCtx,
   table: string,
   indexName: string,
   field: string,
@@ -278,6 +335,12 @@ async function findLeaseableTask(
 
   for (const candidate of candidates) {
     const task = parseTaskRequest(withoutSystemFields(candidate));
+    const project = await verifiedProject(ctx, task.projectId);
+
+    if (project === null) {
+      continue;
+    }
+
     const subscription = await subscriptionForTask(
       ctx,
       runner.volunteerUserId,
@@ -435,6 +498,11 @@ export const createTask = mutation({
       ...parsedTask,
       createdByUserId: actor.userId
     } satisfies TaskRequest;
+    const project = await requireMaintainerProject(
+      ctx,
+      task.projectId,
+      actor.userId
+    );
     const existing = await uniqueByIndex<StoredDoc>(
       ctx,
       "taskRequests",
@@ -445,6 +513,13 @@ export const createTask = mutation({
 
     if (existing !== null) {
       throw new Error(`Task request already exists: ${task.id}`);
+    }
+
+    if (
+      project.repository !== undefined &&
+      JSON.stringify(project.repository) !== JSON.stringify(task.repository)
+    ) {
+      throw new Error("Task repository must match the verified project");
     }
 
     await ctx.db.insert("taskRequests", task);
@@ -460,6 +535,67 @@ export const createTask = mutation({
     });
 
     return task;
+  }
+});
+
+export const myTasks = query({
+  args: {
+    projectId: v.optional(v.string())
+  },
+  handler: async (ctx, args) => {
+    const actor = await requireAuthenticatedUser(ctx);
+    const taskDocs = await collectByIndex<StoredDoc>(
+      ctx,
+      "taskRequests",
+      "by_created_by",
+      "createdByUserId",
+      actor.userId
+    );
+    const verifiedTasks: TaskRequest[] = [];
+
+    for (const taskDoc of taskDocs) {
+      const task = parseTaskRequest(withoutSystemFields(taskDoc));
+
+      if (
+        await isVerifiedMaintainerProject(ctx, task.projectId, actor.userId)
+      ) {
+        verifiedTasks.push(task);
+      }
+    }
+
+    return verifiedTasks
+      .filter((task) => args.projectId === undefined || task.projectId === args.projectId)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }
+});
+
+export const taskDetail = query({
+  args: {
+    taskRequestId: v.string()
+  },
+  handler: async (ctx, args) => {
+    const actor = await requireAuthenticatedUser(ctx);
+    const task = await uniqueByIndex<StoredDoc>(
+      ctx,
+      "taskRequests",
+      "by_id",
+      "id",
+      args.taskRequestId
+    );
+
+    if (task === null) {
+      return null;
+    }
+
+    const parsedTask = parseTaskRequest(withoutSystemFields(task));
+
+    if (parsedTask.createdByUserId !== actor.userId) {
+      throw new Error("Only the task creator can view this task");
+    }
+
+    await requireMaintainerProject(ctx, parsedTask.projectId, actor.userId);
+
+    return parsedTask;
   }
 });
 
@@ -502,6 +638,8 @@ export const activateTask = mutation({
       throw new Error("Only the task creator can activate this task");
     }
 
+    await requireMaintainerProject(ctx, parsedTask.projectId, actor.userId);
+
     if (parsedTask.expiresAt !== undefined && Date.parse(parsedTask.expiresAt) <= Date.parse(now)) {
       throw new Error("Cannot activate an expired task request");
     }
@@ -518,6 +656,54 @@ export const activateTask = mutation({
     });
 
     return { ...parsedTask, status: "active", updatedAt: now } satisfies TaskRequest;
+  }
+});
+
+export const archiveTask = mutation({
+  args: {
+    taskRequestId: v.string(),
+    now: v.string()
+  },
+  handler: async (ctx, args) => {
+    const actor = await requireAuthenticatedUser(ctx);
+    const now = requireIsoNow(args.now);
+    const task = await uniqueByIndex<StoredDoc>(
+      ctx,
+      "taskRequests",
+      "by_id",
+      "id",
+      args.taskRequestId
+    );
+
+    if (task === null) {
+      throw new Error(`Task request not found: ${args.taskRequestId}`);
+    }
+
+    const parsedTask = parseTaskRequest(withoutSystemFields(task));
+
+    if (parsedTask.createdByUserId !== actor.userId) {
+      throw new Error("Only the task creator can archive this task");
+    }
+
+    await requireMaintainerProject(ctx, parsedTask.projectId, actor.userId);
+
+    if (parsedTask.status === "archived") {
+      return parsedTask;
+    }
+
+    await ctx.db.patch(task._id, { status: "archived", updatedAt: now });
+    await insertAuditEvent(ctx, {
+      eventType: "task.archived",
+      entityType: "taskRequest",
+      entityId: parsedTask.id,
+      projectId: parsedTask.projectId,
+      taskRequestId: parsedTask.id,
+      actorUserId: actor.userId,
+      occurredAt: now,
+      metadata: { previousStatus: parsedTask.status }
+    });
+
+    return { ...parsedTask, status: "archived", updatedAt: now } satisfies TaskRequest;
   }
 });
 
