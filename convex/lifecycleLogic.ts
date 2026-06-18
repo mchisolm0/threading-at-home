@@ -1,6 +1,7 @@
 import type {
   ResultPackage,
   RunnerCapability,
+  RunnerCapabilityKey,
   TaskLease,
   TaskRequest
 } from "@oss-capacity/core";
@@ -29,6 +30,21 @@ export type LeaseCandidateState = {
     readonly allowPatches: boolean;
   };
 };
+
+export type StaleRunCleanupDecision =
+  | {
+      readonly shouldExpire: false;
+    }
+  | {
+      readonly shouldExpire: true;
+      readonly reason:
+        | "missing_lease"
+        | "expired_active_lease"
+        | "expired_lease"
+        | "released_lease"
+        | "completed_lease"
+        | "revoked_lease";
+    };
 
 const sandboxRank = {
   "read-only": 0,
@@ -69,7 +85,7 @@ function supportsTask(
     return false;
   }
 
-  return task.requiredCapabilities.every((capability) =>
+  return task.requiredCapabilities.every((capability: RunnerCapabilityKey) =>
     runner.supportedCapabilities.includes(capability)
   );
 }
@@ -137,6 +153,42 @@ export function shouldExpireLease(
 
 export function isTerminalRunStatus(status: string): boolean {
   return terminalRunStatuses.has(status);
+}
+
+export function shouldExpireStaleRun(
+  run: { readonly status: string; readonly leaseId?: string },
+  lease:
+    | {
+        readonly status: string;
+        readonly expiresAt: string;
+      }
+    | null,
+  now: string
+): StaleRunCleanupDecision {
+  if (isTerminalRunStatus(run.status)) {
+    return { shouldExpire: false };
+  }
+
+  if (run.leaseId === undefined || lease === null) {
+    return { shouldExpire: true, reason: "missing_lease" };
+  }
+
+  if (shouldExpireLease(lease, now)) {
+    return { shouldExpire: true, reason: "expired_active_lease" };
+  }
+
+  switch (lease.status) {
+    case "expired":
+      return { shouldExpire: true, reason: "expired_lease" };
+    case "released":
+      return { shouldExpire: true, reason: "released_lease" };
+    case "completed":
+      return { shouldExpire: true, reason: "completed_lease" };
+    case "revoked":
+      return { shouldExpire: true, reason: "revoked_lease" };
+    default:
+      return { shouldExpire: false };
+  }
 }
 
 export function assertTerminalResultPackage(

@@ -202,7 +202,8 @@ export default defineSchema({
     .index("by_task", ["taskRequestId"])
     .index("by_task_status", ["taskRequestId", "status"])
     .index("by_lease_id", ["leaseId"])
-    .index("by_runner_status", ["runnerId", "status"]),
+    .index("by_runner_status", ["runnerId", "status"])
+    .index("by_status_updated_at", ["status", "updatedAt"]),
 
   resultPackages: defineTable({
     resultPackageId: v.string(),
