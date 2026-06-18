@@ -9,6 +9,7 @@ import {
   type TaskRequest
 } from "@oss-capacity/core";
 import {
+  type IndexRangeBuilder,
   mutationGeneric,
   type GenericDataModel,
   type GenericMutationCtx
@@ -28,6 +29,13 @@ type StoredDoc = {
   readonly _id: GenericId<string>;
   readonly [key: string]: Value;
 };
+type TaskLeaseIndexDocument = Record<"taskRequestId" | "status", string> &
+  Record<string, Value>;
+type VolunteerProjectSubscriptionIndexDocument = Record<
+  "volunteerUserId" | "projectId",
+  string
+> &
+  Record<string, Value>;
 
 const mutation = mutationGeneric;
 
@@ -137,13 +145,17 @@ async function activeLeaseCountForTask(
   taskRequestId: string,
   now: string
 ): Promise<number> {
-  const leases = await collectByIndex<StoredDoc>(
-    ctx,
-    "taskLeases",
-    "by_task_status",
-    "taskRequestId",
-    taskRequestId
-  );
+  const leases = (await ctx.db
+    .query("taskLeases")
+    .withIndex("by_task_status", (q) => {
+      const range = q as unknown as IndexRangeBuilder<
+        TaskLeaseIndexDocument,
+        ["taskRequestId", "status"]
+      >;
+
+      return range.eq("taskRequestId", taskRequestId).eq("status", "active");
+    })
+    .collect()) as StoredDoc[];
 
   return leases.filter(
     (lease) =>
@@ -173,17 +185,17 @@ async function subscriptionForTask(
   volunteerUserId: string,
   projectId: string
 ): Promise<StoredDoc | null> {
-  const subscriptions = await collectByIndex<StoredDoc>(
-    ctx,
-    "volunteerProjectSubscriptions",
-    "by_volunteer_project",
-    "volunteerUserId",
-    volunteerUserId
-  );
+  return (await ctx.db
+    .query("volunteerProjectSubscriptions")
+    .withIndex("by_volunteer_project", (q) => {
+      const range = q as unknown as IndexRangeBuilder<
+        VolunteerProjectSubscriptionIndexDocument,
+        ["volunteerUserId", "projectId"]
+      >;
 
-  return (
-    subscriptions.find((subscription) => subscription.projectId === projectId) ?? null
-  );
+      return range.eq("volunteerUserId", volunteerUserId).eq("projectId", projectId);
+    })
+    .unique()) as StoredDoc | null;
 }
 
 async function findLeaseableTask(
