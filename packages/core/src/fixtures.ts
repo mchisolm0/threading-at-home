@@ -70,7 +70,7 @@ export const exampleTaskRequest = {
     destination: "maintainer_inbox",
     visibility: "maintainer_only"
   },
-  requiredCapabilities: ["codex.exec.json"],
+  requiredCapabilities: ["codex.exec.json", "codex.exec.output_schema"],
   maxRuns: 3,
   createdAt: now,
   updatedAt: now,
@@ -118,6 +118,17 @@ export const exampleRunnerCapability = {
   supportsNetwork: false,
   supportsPatchCapture: true,
   supportedTaskTypes: ["analysis", "triage", "docs_draft", "test_investigation"],
+  supportedCapabilities: [
+    "codex.exec.json",
+    "codex.exec.output_schema",
+    "codex.app_server.rate_limits",
+    "codex.version_detection",
+    "sandbox.read_only",
+    "sandbox.workspace_write",
+    "network.disabled",
+    "patch.capture",
+    "command.summary"
+  ],
   maxOutputBytes: 5 * 1024 * 1024,
   registeredAt: now,
   lastSeenAt: now

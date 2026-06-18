@@ -66,6 +66,32 @@ export const identityVisibilityModes = [
 export const runnerPlatforms = ["darwin", "linux", "win32", "unknown"] as const;
 export const runnerArchitectures = ["arm64", "x64", "unknown"] as const;
 export const codexAuthModes = ["chatgpt", "api_key", "unknown"] as const;
+export const runnerCapabilityKeys = [
+  "codex.exec.json",
+  "codex.exec.output_schema",
+  "codex.app_server.rate_limits",
+  "codex.version_detection",
+  "sandbox.read_only",
+  "sandbox.workspace_write",
+  "network.disabled",
+  "patch.capture",
+  "command.summary"
+] as const;
+export const jsonSchemaTypeNames = [
+  "array",
+  "boolean",
+  "integer",
+  "null",
+  "number",
+  "object",
+  "string"
+] as const;
+export const resultPackageRunStatuses = [
+  "completed",
+  "failed",
+  "canceled",
+  "expired"
+] as const;
 
 const utcDateTimePattern =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
@@ -75,6 +101,170 @@ const entityIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const gitRefPattern = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/;
 const contentHashPattern = /^sha256:[a-f0-9]{64}$/;
 const gitCommitShaPattern = /^[a-f0-9]{40}$/;
+const jsonSchemaRecognizedKeys = [
+  "$id",
+  "$ref",
+  "$schema",
+  "additionalProperties",
+  "allOf",
+  "anyOf",
+  "const",
+  "description",
+  "enum",
+  "items",
+  "oneOf",
+  "properties",
+  "required",
+  "title",
+  "type"
+] as const;
+
+function hasOwnKey(value: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function isValidUtcDateTime(value: string): boolean {
+  if (!utcDateTimePattern.test(value)) {
+    return false;
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return false;
+  }
+
+  const canonicalValue = value.includes(".") ? value : value.replace("Z", ".000Z");
+
+  return date.toISOString() === canonicalValue;
+}
+
+function isAfterOrEqual(left: string, right: string): boolean {
+  return Date.parse(left) >= Date.parse(right);
+}
+
+function isAfter(left: string, right: string): boolean {
+  return Date.parse(left) > Date.parse(right);
+}
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    (typeof value === "number" && Number.isFinite(value))
+  ) {
+    return true;
+  }
+
+  if (Array.isArray(value)) {
+    return value.every(isJsonValue);
+  }
+
+  if (isJsonObject(value)) {
+    return Object.values(value).every(isJsonValue);
+  }
+
+  return false;
+}
+
+function isJsonSchemaType(value: unknown): boolean {
+  if (typeof value === "string") {
+    return jsonSchemaTypeNames.includes(value as (typeof jsonSchemaTypeNames)[number]);
+  }
+
+  if (Array.isArray(value)) {
+    return (
+      value.length > 0 &&
+      value.every((item) =>
+        jsonSchemaTypeNames.includes(item as (typeof jsonSchemaTypeNames)[number])
+      )
+    );
+  }
+
+  return false;
+}
+
+function isJsonSchemaArray(value: unknown): value is readonly JsonObject[] {
+  return Array.isArray(value) && value.length > 0 && value.every(isJsonSchema);
+}
+
+function isJsonSchema(value: unknown): value is JsonObject {
+  if (!isJsonObject(value)) {
+    return false;
+  }
+
+  if (!jsonSchemaRecognizedKeys.some((key) => hasOwnKey(value, key))) {
+    return false;
+  }
+
+  if (hasOwnKey(value, "type") && !isJsonSchemaType(value.type)) {
+    return false;
+  }
+
+  if (
+    hasOwnKey(value, "required") &&
+    (!Array.isArray(value.required) ||
+      !value.required.every((item) => typeof item === "string" && item.length > 0))
+  ) {
+    return false;
+  }
+
+  if (
+    hasOwnKey(value, "properties") &&
+    (!isJsonObject(value.properties) ||
+      !Object.values(value.properties).every(isJsonSchema))
+  ) {
+    return false;
+  }
+
+  if (
+    hasOwnKey(value, "items") &&
+    !(
+      isJsonSchema(value.items) ||
+      (Array.isArray(value.items) && value.items.length > 0 && value.items.every(isJsonSchema))
+    )
+  ) {
+    return false;
+  }
+
+  if (
+    hasOwnKey(value, "additionalProperties") &&
+    typeof value.additionalProperties !== "boolean" &&
+    !isJsonSchema(value.additionalProperties)
+  ) {
+    return false;
+  }
+
+  if (
+    hasOwnKey(value, "enum") &&
+    (!Array.isArray(value.enum) || value.enum.length === 0 || !value.enum.every(isJsonValue))
+  ) {
+    return false;
+  }
+
+  if (hasOwnKey(value, "const") && !isJsonValue(value.const)) {
+    return false;
+  }
+
+  if (hasOwnKey(value, "oneOf") && !isJsonSchemaArray(value.oneOf)) {
+    return false;
+  }
+
+  if (hasOwnKey(value, "anyOf") && !isJsonSchemaArray(value.anyOf)) {
+    return false;
+  }
+
+  if (hasOwnKey(value, "allOf") && !isJsonSchemaArray(value.allOf)) {
+    return false;
+  }
+
+  return Object.values(value).every(isJsonValue);
+}
 
 export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([
@@ -91,7 +281,13 @@ export const jsonObjectSchema = z.record(z.string(), jsonValueSchema);
 
 export const isoDateTimeSchema = z
   .string()
-  .regex(utcDateTimePattern, "Expected an ISO 8601 UTC date-time string");
+  .refine(isValidUtcDateTime, "Expected a valid ISO 8601 UTC date-time string");
+
+export const jsonSchemaTypeNameSchema = z.enum(jsonSchemaTypeNames);
+export const jsonSchemaSchema = z.custom<JsonObject>(
+  isJsonSchema,
+  "Expected at least one JSON Schema keyword"
+);
 
 export const entityIdSchema = z
   .string()
@@ -127,6 +323,8 @@ export const identityVisibilityModeSchema = z.enum(identityVisibilityModes);
 export const runnerPlatformSchema = z.enum(runnerPlatforms);
 export const runnerArchitectureSchema = z.enum(runnerArchitectures);
 export const codexAuthModeSchema = z.enum(codexAuthModes);
+export const runnerCapabilityKeySchema = z.enum(runnerCapabilityKeys);
+export const resultPackageRunStatusSchema = z.enum(resultPackageRunStatuses);
 
 export const gitRepositorySchema = z
   .object({
@@ -182,9 +380,11 @@ export const taskRequestSchema = z
     target: taskTargetSchema,
     permissions: taskPermissionsSchema,
     prompt: z.string().min(1).max(40_000),
-    outputSchema: jsonObjectSchema.optional(),
+    outputSchema: jsonSchemaSchema.optional(),
     reporting: taskReportingSchema,
-    requiredCapabilities: z.array(z.string().min(1).max(80)).max(25),
+    requiredCapabilities: z
+      .array(runnerCapabilityKeySchema)
+      .max(runnerCapabilityKeys.length),
     maxRuns: z.number().int().min(1).max(100),
     createdAt: isoDateTimeSchema,
     updatedAt: isoDateTimeSchema,
@@ -194,6 +394,23 @@ export const taskRequestSchema = z
   .refine((task) => task.projectId === task.repository.fullName, {
     message: "projectId must match repository.fullName",
     path: ["projectId"]
+  })
+  .superRefine((task, context) => {
+    if (!isAfterOrEqual(task.updatedAt, task.createdAt)) {
+      context.addIssue({
+        code: "custom",
+        message: "updatedAt must be after or equal to createdAt",
+        path: ["updatedAt"]
+      });
+    }
+
+    if (task.expiresAt && !isAfter(task.expiresAt, task.createdAt)) {
+      context.addIssue({
+        code: "custom",
+        message: "expiresAt must be after createdAt",
+        path: ["expiresAt"]
+      });
+    }
   });
 
 export const volunteerCapacityPolicySchema = z
@@ -241,7 +458,16 @@ export const volunteerPolicySchema = z
     createdAt: isoDateTimeSchema,
     updatedAt: isoDateTimeSchema
   })
-  .strict();
+  .strict()
+  .superRefine((policy, context) => {
+    if (!isAfterOrEqual(policy.updatedAt, policy.createdAt)) {
+      context.addIssue({
+        code: "custom",
+        message: "updatedAt must be after or equal to createdAt",
+        path: ["updatedAt"]
+      });
+    }
+  });
 
 export const runnerCapabilitySchema = z
   .object({
@@ -256,11 +482,24 @@ export const runnerCapabilitySchema = z
     supportsNetwork: z.boolean(),
     supportsPatchCapture: z.boolean(),
     supportedTaskTypes: z.array(taskTypeSchema).min(1).max(taskTypes.length),
+    supportedCapabilities: z
+      .array(runnerCapabilityKeySchema)
+      .min(1)
+      .max(runnerCapabilityKeys.length),
     maxOutputBytes: z.number().int().min(1).max(100 * 1024 * 1024),
     registeredAt: isoDateTimeSchema,
     lastSeenAt: isoDateTimeSchema
   })
-  .strict();
+  .strict()
+  .superRefine((runner, context) => {
+    if (!isAfterOrEqual(runner.lastSeenAt, runner.registeredAt)) {
+      context.addIssue({
+        code: "custom",
+        message: "lastSeenAt must be after or equal to registeredAt",
+        path: ["lastSeenAt"]
+      });
+    }
+  });
 
 export const taskLeaseSchema = z
   .object({
@@ -279,7 +518,32 @@ export const taskLeaseSchema = z
     heartbeatAt: isoDateTimeSchema.optional(),
     releasedAt: isoDateTimeSchema.optional()
   })
-  .strict();
+  .strict()
+  .superRefine((lease, context) => {
+    if (!isAfter(lease.expiresAt, lease.leasedAt)) {
+      context.addIssue({
+        code: "custom",
+        message: "expiresAt must be after leasedAt",
+        path: ["expiresAt"]
+      });
+    }
+
+    if (lease.heartbeatAt && !isAfterOrEqual(lease.heartbeatAt, lease.leasedAt)) {
+      context.addIssue({
+        code: "custom",
+        message: "heartbeatAt must be after or equal to leasedAt",
+        path: ["heartbeatAt"]
+      });
+    }
+
+    if (lease.releasedAt && !isAfterOrEqual(lease.releasedAt, lease.leasedAt)) {
+      context.addIssue({
+        code: "custom",
+        message: "releasedAt must be after or equal to leasedAt",
+        path: ["releasedAt"]
+      });
+    }
+  });
 
 export const codexUsageSchema = z
   .object({
@@ -334,14 +598,14 @@ export const resultPackageSchema = z
     projectId: projectKeySchema,
     runnerId: entityIdSchema.optional(),
     volunteerUserId: entityIdSchema.optional(),
-    runStatus: taskRunStatusSchema,
+    runStatus: resultPackageRunStatusSchema,
     taskSnapshotHash: contentHashSchema,
     promptHash: contentHashSchema,
     repositoryCommitSha: gitCommitShaSchema.optional(),
     codexCliVersion: z.string().min(1).max(120).optional(),
     sandbox: sandboxModeSchema,
     startedAt: isoDateTimeSchema,
-    completedAt: isoDateTimeSchema.optional(),
+    completedAt: isoDateTimeSchema,
     usage: codexUsageSchema.optional(),
     summary: z.string().min(1).max(8_000).optional(),
     structuredOutput: jsonObjectSchema.optional(),
@@ -352,12 +616,44 @@ export const resultPackageSchema = z
     resultVisibility: resultVisibilityModeSchema,
     volunteerVisibility: identityVisibilityModeSchema
   })
-  .strict();
+  .strict()
+  .superRefine((result, context) => {
+    if (!isAfterOrEqual(result.completedAt, result.startedAt)) {
+      context.addIssue({
+        code: "custom",
+        message: "completedAt must be after or equal to startedAt",
+        path: ["completedAt"]
+      });
+    }
+
+    const hasCompletedOutput =
+      Boolean(result.summary) ||
+      Boolean(result.structuredOutput) ||
+      result.commandSummaries.length > 0 ||
+      result.artifacts.length > 0;
+
+    if (result.runStatus === "completed" && !hasCompletedOutput) {
+      context.addIssue({
+        code: "custom",
+        message: "completed result packages must include output",
+        path: ["runStatus"]
+      });
+    }
+
+    if (result.runStatus !== "completed" && !result.error) {
+      context.addIssue({
+        code: "custom",
+        message: "non-completed result packages must include an error",
+        path: ["error"]
+      });
+    }
+  });
 
 export type IsoDateTimeString = z.infer<typeof isoDateTimeSchema>;
 export type ProjectKey = z.infer<typeof projectKeySchema>;
 export type ContentHash = z.infer<typeof contentHashSchema>;
 export type GitRepository = z.infer<typeof gitRepositorySchema>;
+export type JsonSchema = z.infer<typeof jsonSchemaSchema>;
 export type TaskRequestStatus = z.infer<typeof taskRequestStatusSchema>;
 export type TaskRunStatus = z.infer<typeof taskRunStatusSchema>;
 export type TaskLeaseStatus = z.infer<typeof taskLeaseStatusSchema>;
@@ -368,6 +664,8 @@ export type SandboxMode = z.infer<typeof sandboxModeSchema>;
 export type PublicPostingMode = z.infer<typeof publicPostingModeSchema>;
 export type ResultVisibilityMode = z.infer<typeof resultVisibilityModeSchema>;
 export type IdentityVisibilityMode = z.infer<typeof identityVisibilityModeSchema>;
+export type RunnerCapabilityKey = z.infer<typeof runnerCapabilityKeySchema>;
+export type ResultPackageRunStatus = z.infer<typeof resultPackageRunStatusSchema>;
 export type TaskRequest = z.infer<typeof taskRequestSchema>;
 export type VolunteerPolicy = z.infer<typeof volunteerPolicySchema>;
 export type RunnerCapability = z.infer<typeof runnerCapabilitySchema>;
