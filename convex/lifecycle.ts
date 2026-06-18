@@ -10,6 +10,7 @@ import {
 } from "@oss-capacity/core";
 import {
   type IndexRangeBuilder,
+  internalMutationGeneric,
   mutationGeneric,
   type GenericDataModel,
   type GenericMutationCtx
@@ -21,7 +22,8 @@ import {
   assertTerminalResultPackage,
   canLeaseTask,
   isTerminalRunStatus,
-  shouldExpireLease
+  shouldExpireLease,
+  shouldExpireStaleRun
 } from "./lifecycleLogic.js";
 
 type MutationCtx = GenericMutationCtx<GenericDataModel>;
@@ -31,6 +33,10 @@ type StoredDoc = {
 };
 type TaskLeaseIndexDocument = Record<"taskRequestId" | "status", string> &
   Record<string, Value>;
+type TaskLeaseExpiryIndexDocument = Record<"status" | "expiresAt", string> &
+  Record<string, Value>;
+type RunCleanupIndexDocument = Record<"status" | "updatedAt", string> &
+  Record<string, Value>;
 type VolunteerProjectSubscriptionIndexDocument = Record<
   "volunteerUserId" | "projectId",
   string
@@ -38,6 +44,11 @@ type VolunteerProjectSubscriptionIndexDocument = Record<
   Record<string, Value>;
 
 const mutation = mutationGeneric;
+const internalMutation = internalMutationGeneric;
+const defaultCleanupBatchSize = 100;
+const maximumCleanupBatchSize = 500;
+const defaultStaleRunAgeMs = 60 * 60 * 1000;
+const nonTerminalCleanupStatuses = ["queued", "leased", "running"] as const;
 
 async function uniqueByIndex<T extends StoredDoc>(
   ctx: MutationCtx,
@@ -92,6 +103,36 @@ function requireIsoNow(now: string): string {
   }
 
   return now;
+}
+
+function isoNow(): string {
+  return new Date(Date.now()).toISOString();
+}
+
+function isoBefore(now: string, ageMs: number): string {
+  return new Date(Date.parse(now) - ageMs).toISOString();
+}
+
+function indexTimestampUpperBound(now: string): string {
+  return new Date(Date.parse(now)).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+function cleanupBatchSize(batchSize: number | undefined): number {
+  if (batchSize === undefined) {
+    return defaultCleanupBatchSize;
+  }
+
+  if (
+    !Number.isInteger(batchSize) ||
+    batchSize < 1 ||
+    batchSize > maximumCleanupBatchSize
+  ) {
+    throw new Error(
+      `Cleanup batch size must be an integer between 1 and ${maximumCleanupBatchSize}`
+    );
+  }
+
+  return batchSize;
 }
 
 function toConvexValue(value: unknown): Value {
@@ -252,6 +293,116 @@ async function findLeaseableTask(
   }
 
   return null;
+}
+
+async function collectExpiredActiveLeases(
+  ctx: MutationCtx,
+  now: string,
+  batchSize: number
+): Promise<StoredDoc[]> {
+  const activeLeases = (await ctx.db
+    .query("taskLeases")
+    .withIndex("by_status_expires_at", (q) => {
+      const range = q as unknown as IndexRangeBuilder<
+        TaskLeaseExpiryIndexDocument,
+        ["status", "expiresAt"]
+      >;
+
+      return range
+        .eq("status", "active")
+        .lte("expiresAt", indexTimestampUpperBound(now));
+    })
+    .take(batchSize)) as StoredDoc[];
+
+  return activeLeases
+    .filter(
+      (lease) =>
+        typeof lease.expiresAt === "string" &&
+        Date.parse(lease.expiresAt) <= Date.parse(now)
+    )
+    .slice(0, batchSize);
+}
+
+async function collectStaleRunCandidates(
+  ctx: MutationCtx,
+  status: string,
+  staleBefore: string,
+  batchSize: number
+): Promise<StoredDoc[]> {
+  const runsWithStatus = (await ctx.db
+    .query("runs")
+    .withIndex("by_status_updated_at", (q) => {
+      const range = q as unknown as IndexRangeBuilder<
+        RunCleanupIndexDocument,
+        ["status", "updatedAt"]
+      >;
+
+      return range
+        .eq("status", status)
+        .lte("updatedAt", indexTimestampUpperBound(staleBefore));
+    })
+    .take(batchSize)) as StoredDoc[];
+
+  return runsWithStatus
+    .filter(
+      (run) =>
+        typeof run.updatedAt === "string" &&
+        Date.parse(run.updatedAt) <= Date.parse(staleBefore)
+    )
+    .slice(0, batchSize);
+}
+
+async function expireLeaseDocument(
+  ctx: MutationCtx,
+  leaseDoc: StoredDoc,
+  now: string,
+  metadata?: Record<string, Value>
+): Promise<{ readonly expired: boolean; readonly lease: TaskLease }> {
+  const lease = parseTaskLease(withoutSystemFields(leaseDoc));
+
+  if (!shouldExpireLease(lease, now)) {
+    return { expired: false, lease };
+  }
+
+  const runDoc = await uniqueByIndex<StoredDoc>(
+    ctx,
+    "runs",
+    "by_run_id",
+    "runId",
+    lease.runId
+  );
+
+  await ctx.db.patch(leaseDoc._id, {
+    status: "expired",
+    releasedAt: now
+  });
+
+  if (runDoc !== null && !isTerminalRunStatus(runDoc.status as string)) {
+    await ctx.db.patch(runDoc._id, {
+      status: "expired",
+      completedAt: now,
+      updatedAt: now
+    });
+  }
+
+  await insertAuditEvent(ctx, {
+    eventType: "lease.expired",
+    entityType: "taskLease",
+    entityId: lease.leaseId,
+    projectId: lease.projectId,
+    taskRequestId: lease.taskRequestId,
+    runId: lease.runId,
+    leaseId: lease.leaseId,
+    actorUserId: lease.volunteerUserId,
+    runnerId: lease.runnerId,
+    occurredAt: now,
+    metadata
+  });
+
+  return {
+    expired: true,
+    lease: { ...lease, status: "expired", releasedAt: now } satisfies TaskLease
+  };
 }
 
 export const createTask = mutation({
@@ -694,43 +845,151 @@ export const expireLease = mutation({
       return { expired: false, lease };
     }
 
-    const runDoc = await uniqueByIndex<StoredDoc>(
-      ctx,
-      "runs",
-      "by_run_id",
-      "runId",
-      lease.runId
-    );
+    return await expireLeaseDocument(ctx, leaseDoc, now);
+  }
+});
 
-    await ctx.db.patch(leaseDoc._id, {
-      status: "expired",
-      releasedAt: now
-    });
+export const expireStaleLeases = internalMutation({
+  args: {
+    now: v.optional(v.string()),
+    batchSize: v.optional(v.number())
+  },
+  handler: async (ctx, args) => {
+    const now = requireIsoNow(args.now ?? isoNow());
+    const batchSize = cleanupBatchSize(args.batchSize);
+    const leaseDocs = await collectExpiredActiveLeases(ctx, now, batchSize);
+    let expiredCount = 0;
 
-    if (runDoc !== null && !isTerminalRunStatus(runDoc.status as string)) {
-      await ctx.db.patch(runDoc._id, {
-        status: "expired",
-        completedAt: now,
-        updatedAt: now
+    for (const leaseDoc of leaseDocs) {
+      const result = await expireLeaseDocument(ctx, leaseDoc, now, {
+        cleanup: true,
+        reason: "lease_deadline"
       });
+
+      if (result.expired) {
+        expiredCount += 1;
+      }
     }
 
-    await insertAuditEvent(ctx, {
-      eventType: "lease.expired",
-      entityType: "taskLease",
-      entityId: lease.leaseId,
-      projectId: lease.projectId,
-      taskRequestId: lease.taskRequestId,
-      runId: lease.runId,
-      leaseId: lease.leaseId,
-      actorUserId: lease.volunteerUserId,
-      runnerId: lease.runnerId,
-      occurredAt: now
-    });
+    return {
+      checked: leaseDocs.length,
+      expired: expiredCount,
+      hasMore: leaseDocs.length === batchSize
+    };
+  }
+});
+
+export const cleanupStaleRuns = internalMutation({
+  args: {
+    now: v.optional(v.string()),
+    staleBefore: v.optional(v.string()),
+    batchSize: v.optional(v.number())
+  },
+  handler: async (ctx, args) => {
+    const now = requireIsoNow(args.now ?? isoNow());
+    const staleBefore = requireIsoNow(
+      args.staleBefore ?? isoBefore(now, defaultStaleRunAgeMs)
+    );
+    const batchSize = cleanupBatchSize(args.batchSize);
+    let checkedCount = 0;
+    let expiredRunCount = 0;
+    let expiredLeaseCount = 0;
+
+    for (const status of nonTerminalCleanupStatuses) {
+      const remaining = batchSize - checkedCount;
+
+      if (remaining <= 0) {
+        break;
+      }
+
+      const runDocs = await collectStaleRunCandidates(
+        ctx,
+        status,
+        staleBefore,
+        remaining
+      );
+      checkedCount += runDocs.length;
+
+      for (const runDoc of runDocs) {
+        const runStatus = String(runDoc.status);
+
+        if (isTerminalRunStatus(runStatus)) {
+          continue;
+        }
+
+        const leaseId =
+          typeof runDoc.leaseId === "string" ? runDoc.leaseId : undefined;
+        const leaseDoc =
+          leaseId === undefined
+            ? null
+            : await uniqueByIndex<StoredDoc>(
+                ctx,
+                "taskLeases",
+                "by_lease_id",
+                "leaseId",
+                leaseId
+              );
+        const lease =
+          leaseDoc === null ? null : parseTaskLease(withoutSystemFields(leaseDoc));
+        const decision = shouldExpireStaleRun(
+          { status: runStatus, leaseId },
+          lease,
+          now
+        );
+
+        if (!decision.shouldExpire) {
+          continue;
+        }
+
+        if (leaseDoc !== null && lease !== null && shouldExpireLease(lease, now)) {
+          const result = await expireLeaseDocument(ctx, leaseDoc, now, {
+            cleanup: true,
+            reason: "stale_run_cleanup"
+          });
+
+          if (result.expired) {
+            expiredLeaseCount += 1;
+          }
+        }
+
+        await ctx.db.patch(runDoc._id, {
+          status: "expired",
+          completedAt: now,
+          updatedAt: now
+        });
+        await insertAuditEvent(ctx, {
+          eventType: "run.expired",
+          entityType: "run",
+          entityId: String(runDoc.runId),
+          projectId:
+            typeof runDoc.projectId === "string" ? runDoc.projectId : undefined,
+          taskRequestId:
+            typeof runDoc.taskRequestId === "string"
+              ? runDoc.taskRequestId
+              : undefined,
+          runId: typeof runDoc.runId === "string" ? runDoc.runId : undefined,
+          leaseId,
+          actorUserId:
+            typeof runDoc.volunteerUserId === "string"
+              ? runDoc.volunteerUserId
+              : undefined,
+          runnerId: typeof runDoc.runnerId === "string" ? runDoc.runnerId : undefined,
+          occurredAt: now,
+          metadata: {
+            cleanup: true,
+            reason: decision.reason,
+            leaseStatus: lease?.status
+          }
+        });
+        expiredRunCount += 1;
+      }
+    }
 
     return {
-      expired: true,
-      lease: { ...lease, status: "expired", releasedAt: now } satisfies TaskLease
+      checked: checkedCount,
+      expiredRuns: expiredRunCount,
+      expiredLeases: expiredLeaseCount,
+      hasMore: checkedCount === batchSize
     };
   }
 });

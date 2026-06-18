@@ -11,7 +11,8 @@ import {
   assertLeaseCanReceiveTerminalResult,
   assertTerminalResultPackage,
   canLeaseTask,
-  shouldExpireLease
+  shouldExpireLease,
+  shouldExpireStaleRun
 } from "./lifecycleLogic.js";
 
 const now = "2026-06-18T12:00:00Z";
@@ -107,6 +108,64 @@ describe("lifecycle planning helpers", () => {
         now
       )
     ).toBe(false);
+  });
+
+  it("marks stale nonterminal runs with expired active leases for cleanup", () => {
+    expect(
+      shouldExpireStaleRun(
+        { status: "leased", leaseId: exampleTaskLease.leaseId },
+        {
+          status: "active",
+          expiresAt: "2026-06-18T11:59:00Z"
+        },
+        now
+      )
+    ).toEqual({ shouldExpire: true, reason: "expired_active_lease" });
+  });
+
+  it("leaves nonterminal runs with fresh active leases alone", () => {
+    expect(
+      shouldExpireStaleRun(
+        { status: "running", leaseId: exampleTaskLease.leaseId },
+        {
+          status: "active",
+          expiresAt: "2026-06-18T12:01:00Z"
+        },
+        now
+      )
+    ).toEqual({ shouldExpire: false });
+  });
+
+  it("cleans up nonterminal runs whose lease was already finalized", () => {
+    expect(
+      shouldExpireStaleRun(
+        { status: "leased", leaseId: exampleTaskLease.leaseId },
+        {
+          status: "expired",
+          expiresAt: "2026-06-18T11:59:00Z"
+        },
+        now
+      )
+    ).toEqual({ shouldExpire: true, reason: "expired_lease" });
+  });
+
+  it("does not re-expire already-terminal runs during stale cleanup", () => {
+    expect(
+      shouldExpireStaleRun(
+        { status: "completed", leaseId: exampleTaskLease.leaseId },
+        {
+          status: "active",
+          expiresAt: "2026-06-18T11:59:00Z"
+        },
+        now
+      )
+    ).toEqual({ shouldExpire: false });
+  });
+
+  it("expires stale nonterminal runs without a lease record", () => {
+    expect(
+      shouldExpireStaleRun({ status: "queued" }, null, now)
+    ).toEqual({ shouldExpire: true, reason: "missing_lease" });
   });
 
   it("requires complete and fail mutations to receive matching terminal packages", () => {
