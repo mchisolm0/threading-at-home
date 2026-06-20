@@ -1,3 +1,12 @@
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import {
+  exampleTaskLease,
+  exampleTaskRequest,
+  exampleVolunteerPolicy
+} from "@oss-capacity/core";
 import { describe, expect, it } from "vitest";
 
 import { runCli, type CliDependencies, type CliIO } from "../src/cli.js";
@@ -5,7 +14,15 @@ import type { BrokerClient } from "../src/broker.js";
 import type { RunnerConfig } from "../src/config.js";
 
 const authHash = `sha256:${"b".repeat(64)}`;
+const taskSnapshotHash = `sha256:${"d".repeat(64)}`;
 const now = new Date("2026-06-20T15:30:00.000Z");
+const autoUploadPolicy = {
+  ...exampleVolunteerPolicy,
+  review: {
+    ...exampleVolunteerPolicy.review,
+    requireBeforeUpload: false
+  }
+};
 
 function createIo(env: NodeJS.ProcessEnv = {}): {
   readonly io: CliIO;
@@ -36,7 +53,10 @@ function createIo(env: NodeJS.ProcessEnv = {}): {
   };
 }
 
-function createBroker(calls: unknown[]): BrokerClient {
+function createBroker(
+  calls: unknown[],
+  overrides: Partial<BrokerClient> = {}
+): BrokerClient {
   return {
     exchangeRunnerSetupToken: async (input) => {
       calls.push({ method: "exchangeRunnerSetupToken", input });
@@ -94,7 +114,24 @@ function createBroker(calls: unknown[]): BrokerClient {
         policy: null,
         subscriptions: []
       };
-    }
+    },
+    eligibleTask: async (input) => {
+      calls.push({ method: "eligibleTask", input });
+      return null;
+    },
+    leaseEligibleTask: async (input) => {
+      calls.push({ method: "leaseEligibleTask", input });
+      return null;
+    },
+    completeRun: async (input) => {
+      calls.push({ method: "completeRun", input });
+      return input.resultPackage;
+    },
+    failRun: async (input) => {
+      calls.push({ method: "failRun", input });
+      return input.resultPackage;
+    },
+    ...overrides
   };
 }
 
@@ -213,5 +250,120 @@ describe("runner CLI", () => {
     expect(output.ok).toBe(false);
     expect(stdout.value).not.toContain("/tmp/runner.json");
     expect(stdout.value).toContain("[redacted-path]");
+  });
+
+  it("returns a nonzero exit code when run-once cannot upload failure", async () => {
+    const { io, stdout, stderr } = createIo();
+    const calls: unknown[] = [];
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "oss-capacity-cli-workspaces-"));
+    const logRoot = await mkdtemp(join(tmpdir(), "oss-capacity-cli-logs-"));
+    const config: RunnerConfig = {
+      schemaVersion: 1,
+      brokerUrl: "https://example.convex.cloud",
+      runnerId: exampleTaskLease.runnerId,
+      runnerAuthTokenHash: authHash,
+      codexBin: "codex",
+      maxOutputBytes: 1024,
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString()
+    };
+    const exitCode = await runCli(
+      [
+        "run-once",
+        "--config",
+        "/tmp/runner.json",
+        "--workspace-dir",
+        workspaceRoot,
+        "--log-dir",
+        logRoot
+      ],
+      io,
+      {
+        readConfig: async () => config,
+        createBrokerClient: () =>
+          createBroker(calls, {
+            runnerConfiguration: async (input) => {
+              calls.push({ method: "runnerConfiguration", input });
+
+              return {
+                runner: {
+                  runnerId: input.runnerId,
+                  platform: "darwin",
+                  architecture: "arm64",
+                  codexAuthMode: "chatgpt",
+                  supportedSandboxModes: ["read-only"],
+                  supportsNetwork: false,
+                  supportsPatchCapture: false,
+                  supportedTaskTypes: ["triage"],
+                  maxOutputBytes: config.maxOutputBytes,
+                  registeredAt: now.toISOString(),
+                  lastSeenAt: now.toISOString()
+                },
+                policy: autoUploadPolicy,
+                subscriptions: []
+              };
+            },
+            eligibleTask: async (input) => {
+              calls.push({ method: "eligibleTask", input });
+              return exampleTaskRequest;
+            },
+            leaseEligibleTask: async (input) => {
+              calls.push({ method: "leaseEligibleTask", input });
+
+              return {
+                task: exampleTaskRequest,
+                lease: {
+                  ...exampleTaskLease,
+                  leaseId: input.leaseId,
+                  runId: input.runId,
+                  runnerId: input.runnerId,
+                  leasedAt: input.now,
+                  expiresAt: input.expiresAt,
+                  heartbeatAt: input.now,
+                  taskSnapshotHash,
+                  leaseTokenHash: input.leaseTokenHash
+                }
+              };
+            },
+            failRun: async (input) => {
+              calls.push({ method: "failRun", input });
+              throw new Error(`upload failed for ${authHash}`);
+            }
+          }),
+        readCodexAccountState: async () => ({
+          codexCliVersion: "0.140.0",
+          authenticated: true,
+          authMode: "chatgpt"
+        }),
+        readCodexRateLimits: async () => ({
+          account: {
+            authenticated: true,
+            authMode: "chatgpt"
+          },
+          rateLimits: [{ usedPercent: 10 }]
+        }),
+        exec: async (_file, args) => {
+          if (args.includes("rev-parse")) {
+            return {
+              stdout: "0123456789abcdef0123456789abcdef01234567\n",
+              stderr: ""
+            };
+          }
+
+          return { stdout: "", stderr: "" };
+        },
+        runCodexExec: async () => {
+          throw new Error("Codex failed for user@example.com at /Users/me/.codex/auth.json");
+        }
+      }
+    );
+    const output = JSON.parse(stdout.value) as { ok: boolean; error?: string };
+
+    expect(exitCode).toBe(1);
+    expect(stderr.value).toBe("");
+    expect(output.ok).toBe(false);
+    expect(stdout.value).not.toContain(authHash);
+    expect(stdout.value).not.toContain("user@example.com");
+    expect(stdout.value).not.toContain("/Users/me/.codex/auth.json");
   });
 });

@@ -1,12 +1,20 @@
 import { getAuthUserId } from "@convex-dev/auth/server";
 import {
+  parseResultPackage,
   parseRunnerCapability,
+  parseTaskLease,
+  parseTaskRequest,
   parseVolunteerPolicy,
   sandboxModes,
   taskTypes,
+  type ResultPackage,
+  type RunnerCapability,
+  type TaskLease,
+  type TaskRequest,
   type VolunteerPolicy
 } from "@oss-capacity/core";
 import {
+  type IndexRangeBuilder,
   mutationGeneric,
   queryGeneric,
   type GenericDataModel,
@@ -15,6 +23,12 @@ import {
 } from "convex/server";
 import { v, type GenericId, type Value } from "convex/values";
 
+import {
+  assertLeaseCanReceiveTerminalResult,
+  assertTerminalResultPackage,
+  canLeaseTask,
+  isTerminalRunStatus
+} from "./lifecycleLogic.js";
 import {
   assertRunnerAuthTokenHashMatches,
   assertRunnerSetupTokenCanBeExchanged,
@@ -97,6 +111,13 @@ type RunnerConfigurationView = {
   readonly policy: VolunteerPolicy | null;
   readonly subscriptions: readonly RunnerConfigurationSubscriptionView[];
 };
+type TaskLeaseIndexDocument = Record<"taskRequestId" | "status", string> &
+  Record<string, Value>;
+type VolunteerProjectSubscriptionIndexDocument = Record<
+  "volunteerUserId" | "projectId",
+  string
+> &
+  Record<string, Value>;
 
 const query = queryGeneric;
 const mutation = mutationGeneric;
@@ -147,6 +168,31 @@ function toConvexValue(value: unknown): Value {
 
 function toConvexDocument(value: object): Record<string, Value> {
   return toConvexValue(value) as Record<string, Value>;
+}
+
+async function contentHash(value: string): Promise<string> {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+
+  return `sha256:${Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0")
+  ).join("")}`;
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`)
+      .join(",")}}`;
+  }
+
+  return JSON.stringify(value) ?? "undefined";
 }
 
 function withoutSystemFields(doc: StoredDoc): Record<string, Value> {
@@ -305,6 +351,253 @@ async function runnerConfigurationView(
       left.projectId.localeCompare(right.projectId)
     )
   };
+}
+
+async function requireRunnerByAuth(
+  ctx: QueryCtx | MutationCtx,
+  runnerId: string,
+  runnerAuthTokenHash: string
+): Promise<RunnerCapability> {
+  const runnerDoc = await runnerById(ctx, runnerId);
+
+  if (runnerDoc === null) {
+    throw new Error(`Runner registration not found: ${runnerId}`);
+  }
+
+  requireRunnerAuth(runnerDoc, runnerAuthTokenHash);
+
+  return parseRunnerCapability(withoutSystemFields(runnerDoc));
+}
+
+async function insertAuditEvent(
+  ctx: MutationCtx,
+  event: {
+    readonly eventType: string;
+    readonly entityType: string;
+    readonly entityId: string;
+    readonly occurredAt: string;
+    readonly projectId?: string;
+    readonly taskRequestId?: string;
+    readonly runId?: string;
+    readonly leaseId?: string;
+    readonly actorUserId?: string;
+    readonly runnerId?: string;
+    readonly metadata?: unknown;
+  }
+): Promise<void> {
+  await ctx.db.insert("auditEvents", toConvexDocument(event));
+}
+
+async function activeLeaseCountForTask(
+  ctx: QueryCtx | MutationCtx,
+  taskRequestId: string,
+  now: string
+): Promise<number> {
+  const leases = (await ctx.db
+    .query("taskLeases")
+    .withIndex("by_task_status", (q) => {
+      const range = q as unknown as IndexRangeBuilder<
+        TaskLeaseIndexDocument,
+        ["taskRequestId", "status"]
+      >;
+
+      return range.eq("taskRequestId", taskRequestId).eq("status", "active");
+    })
+    .collect()) as StoredDoc[];
+
+  return leases.filter(
+    (lease) =>
+      lease.status === "active" &&
+      typeof lease.expiresAt === "string" &&
+      Date.parse(lease.expiresAt) > Date.parse(now)
+  ).length;
+}
+
+async function runCountForTask(
+  ctx: QueryCtx | MutationCtx,
+  taskRequestId: string
+): Promise<number> {
+  const runs = (await ctx.db
+    .query("runs")
+    .withIndex("by_task", (q) => q.eq("taskRequestId", taskRequestId))
+    .collect()) as StoredDoc[];
+
+  return runs.length;
+}
+
+async function subscriptionForTask(
+  ctx: QueryCtx | MutationCtx,
+  volunteerUserId: string,
+  projectId: string
+): Promise<StoredDoc | null> {
+  return (await ctx.db
+    .query("volunteerProjectSubscriptions")
+    .withIndex("by_volunteer_project", (q) => {
+      const range = q as unknown as IndexRangeBuilder<
+        VolunteerProjectSubscriptionIndexDocument,
+        ["volunteerUserId", "projectId"]
+      >;
+
+      return range.eq("volunteerUserId", volunteerUserId).eq("projectId", projectId);
+    })
+    .unique()) as StoredDoc | null;
+}
+
+async function findLeaseableTask(
+  ctx: QueryCtx | MutationCtx,
+  runner: RunnerCapability,
+  now: string,
+  taskRequestId?: string
+): Promise<TaskRequest | null> {
+  const policy = await volunteerPolicy(ctx, runner.volunteerUserId);
+  const candidates = taskRequestId
+    ? [
+        (await ctx.db
+          .query("taskRequests")
+          .withIndex("by_id", (q) => q.eq("id", taskRequestId))
+          .unique()) as StoredDoc | null
+      ].filter((task): task is StoredDoc => task !== null)
+    : ((await ctx.db
+        .query("taskRequests")
+        .withIndex("by_status", (q) => q.eq("status", "active"))
+        .collect()) as StoredDoc[]);
+
+  for (const candidate of candidates) {
+    const task = parseTaskRequest(withoutSystemFields(candidate));
+    const project = await projectById(ctx, task.projectId);
+
+    if (project === null || project.status !== "verified") {
+      continue;
+    }
+
+    const subscription = await subscriptionForTask(
+      ctx,
+      runner.volunteerUserId,
+      task.projectId
+    );
+    const activeLeaseCount = await activeLeaseCountForTask(ctx, task.id, now);
+    const runCount = await runCountForTask(ctx, task.id);
+
+    if (
+      canLeaseTask(
+        {
+          task,
+          activeLeaseCount,
+          runCount,
+          subscription:
+            subscription === null
+              ? undefined
+              : {
+                  enabled: subscription.enabled as boolean,
+                  taskTypeAllowlist: subscription.taskTypeAllowlist as string[],
+                  maxSandbox: subscription.maxSandbox as string,
+                  allowNetwork: subscription.allowNetwork as boolean,
+                  allowPatches: subscription.allowPatches as boolean
+                },
+          policy: policy ?? undefined
+        },
+        runner,
+        now
+      )
+    ) {
+      return task;
+    }
+  }
+
+  return null;
+}
+
+async function writeTerminalResult(
+  ctx: MutationCtx,
+  resultPackage: ResultPackage,
+  now: string,
+  runner: RunnerCapability
+): Promise<ResultPackage> {
+  const runDoc = (await ctx.db
+    .query("runs")
+    .withIndex("by_run_id", (q) => q.eq("runId", resultPackage.runId))
+    .unique()) as StoredDoc | null;
+
+  if (runDoc === null) {
+    throw new Error(`Run not found: ${resultPackage.runId}`);
+  }
+
+  if (isTerminalRunStatus(runDoc.status as string)) {
+    throw new Error(`Run is already terminal: ${String(runDoc.status)}`);
+  }
+
+  const leaseDoc = (await ctx.db
+    .query("taskLeases")
+    .withIndex("by_lease_id", (q) => q.eq("leaseId", resultPackage.leaseId))
+    .unique()) as StoredDoc | null;
+
+  if (leaseDoc === null) {
+    throw new Error(`Lease not found: ${resultPackage.leaseId}`);
+  }
+
+  const lease = parseTaskLease(withoutSystemFields(leaseDoc));
+  assertLeaseCanReceiveTerminalResult(lease, now, resultPackage.completedAt);
+
+  if (
+    lease.runnerId !== runner.runnerId ||
+    lease.volunteerUserId !== runner.volunteerUserId
+  ) {
+    throw new Error("Lease does not belong to runner");
+  }
+
+  if (
+    lease.runId !== resultPackage.runId ||
+    lease.taskRequestId !== resultPackage.taskRequestId ||
+    lease.projectId !== resultPackage.projectId
+  ) {
+    throw new Error("Result package does not match lease");
+  }
+
+  if (
+    (resultPackage.runnerId !== undefined &&
+      resultPackage.runnerId !== runner.runnerId) ||
+    (resultPackage.volunteerUserId !== undefined &&
+      resultPackage.volunteerUserId !== runner.volunteerUserId)
+  ) {
+    throw new Error("Result package identity does not match runner");
+  }
+
+  const existingResultPackage = (await ctx.db
+    .query("resultPackages")
+    .withIndex("by_result_package_id", (q) =>
+      q.eq("resultPackageId", resultPackage.resultPackageId)
+    )
+    .unique()) as StoredDoc | null;
+
+  if (existingResultPackage !== null) {
+    throw new Error(`Result package already exists: ${resultPackage.resultPackageId}`);
+  }
+
+  await ctx.db.insert("resultPackages", toConvexDocument(resultPackage));
+  await ctx.db.patch(runDoc._id, {
+    status: resultPackage.runStatus,
+    completedAt: resultPackage.completedAt,
+    updatedAt: now
+  });
+  await ctx.db.patch(leaseDoc._id, {
+    status: resultPackage.runStatus === "completed" ? "completed" : "released",
+    releasedAt: resultPackage.completedAt
+  });
+  await insertAuditEvent(ctx, {
+    eventType: `run.${resultPackage.runStatus}`,
+    entityType: "run",
+    entityId: resultPackage.runId,
+    projectId: resultPackage.projectId,
+    taskRequestId: resultPackage.taskRequestId,
+    runId: resultPackage.runId,
+    leaseId: resultPackage.leaseId,
+    actorUserId: runner.volunteerUserId,
+    runnerId: resultPackage.runnerId,
+    occurredAt: resultPackage.completedAt,
+    metadata: { resultPackageId: resultPackage.resultPackageId }
+  });
+
+  return resultPackage;
 }
 
 function runnerTokenView(token: RunnerSetupTokenRecord) {
@@ -667,5 +960,163 @@ export const runnerConfiguration = query({
     requireRunnerAuth(runner, args.runnerAuthTokenHash);
 
     return await runnerConfigurationView(ctx, runner);
+  }
+});
+
+export const eligibleTask = query({
+  args: {
+    runnerId: v.string(),
+    runnerAuthTokenHash: v.string(),
+    now: v.string(),
+    taskRequestId: v.optional(v.string())
+  },
+  handler: async (ctx, args): Promise<TaskRequest | null> => {
+    const now = requireIsoDateTime(args.now, "now");
+    const runner = await requireRunnerByAuth(
+      ctx,
+      args.runnerId,
+      args.runnerAuthTokenHash
+    );
+
+    return await findLeaseableTask(ctx, runner, now, args.taskRequestId);
+  }
+});
+
+export const leaseEligibleTask = mutation({
+  args: {
+    runnerId: v.string(),
+    runnerAuthTokenHash: v.string(),
+    leaseId: v.string(),
+    runId: v.string(),
+    leaseTokenHash: v.string(),
+    now: v.string(),
+    expiresAt: v.string(),
+    taskRequestId: v.optional(v.string())
+  },
+  handler: async (ctx, args): Promise<{
+    readonly task: TaskRequest;
+    readonly lease: TaskLease;
+  } | null> => {
+    const now = requireIsoDateTime(args.now, "now");
+    requireIsoDateTime(args.expiresAt, "expiresAt");
+
+    if (Date.parse(args.expiresAt) <= Date.parse(now)) {
+      throw new Error("Lease expiration must be after now");
+    }
+
+    const runner = await requireRunnerByAuth(
+      ctx,
+      args.runnerId,
+      args.runnerAuthTokenHash
+    );
+    const existingLease = (await ctx.db
+      .query("taskLeases")
+      .withIndex("by_lease_id", (q) => q.eq("leaseId", args.leaseId))
+      .unique()) as StoredDoc | null;
+    const existingRun = (await ctx.db
+      .query("runs")
+      .withIndex("by_run_id", (q) => q.eq("runId", args.runId))
+      .unique()) as StoredDoc | null;
+
+    if (existingLease !== null || existingRun !== null) {
+      throw new Error("Lease or run id already exists");
+    }
+
+    const task = await findLeaseableTask(ctx, runner, now, args.taskRequestId);
+
+    if (task === null) {
+      return null;
+    }
+
+    const attempt = (await runCountForTask(ctx, task.id)) + 1;
+    const taskSnapshotHash = await contentHash(stableStringify(task));
+    const lease = parseTaskLease({
+      leaseId: args.leaseId,
+      runId: args.runId,
+      taskRequestId: task.id,
+      projectId: task.projectId,
+      runnerId: runner.runnerId,
+      volunteerUserId: runner.volunteerUserId,
+      status: "active",
+      attempt,
+      taskSnapshotHash,
+      leaseTokenHash: args.leaseTokenHash,
+      leasedAt: now,
+      expiresAt: args.expiresAt,
+      heartbeatAt: now
+    } satisfies TaskLease);
+
+    await ctx.db.insert("runs", {
+      runId: args.runId,
+      taskRequestId: task.id,
+      projectId: task.projectId,
+      leaseId: args.leaseId,
+      runnerId: runner.runnerId,
+      volunteerUserId: runner.volunteerUserId,
+      status: "leased",
+      attempt,
+      taskSnapshotHash,
+      startedAt: now,
+      createdAt: now,
+      updatedAt: now
+    });
+    await ctx.db.insert("taskLeases", toConvexDocument(lease));
+    await insertAuditEvent(ctx, {
+      eventType: "task.leased",
+      entityType: "taskLease",
+      entityId: lease.leaseId,
+      projectId: task.projectId,
+      taskRequestId: task.id,
+      runId: args.runId,
+      leaseId: args.leaseId,
+      actorUserId: runner.volunteerUserId,
+      runnerId: runner.runnerId,
+      occurredAt: now,
+      metadata: { attempt }
+    });
+
+    return { task, lease };
+  }
+});
+
+export const completeRun = mutation({
+  args: {
+    runnerId: v.string(),
+    runnerAuthTokenHash: v.string(),
+    resultPackage: v.any(),
+    now: v.string()
+  },
+  handler: async (ctx, args): Promise<ResultPackage> => {
+    const now = requireIsoDateTime(args.now, "now");
+    const runner = await requireRunnerByAuth(
+      ctx,
+      args.runnerId,
+      args.runnerAuthTokenHash
+    );
+    const resultPackage = parseResultPackage(args.resultPackage);
+    assertTerminalResultPackage(resultPackage, "completed");
+
+    return await writeTerminalResult(ctx, resultPackage, now, runner);
+  }
+});
+
+export const failRun = mutation({
+  args: {
+    runnerId: v.string(),
+    runnerAuthTokenHash: v.string(),
+    resultPackage: v.any(),
+    now: v.string()
+  },
+  handler: async (ctx, args): Promise<ResultPackage> => {
+    const now = requireIsoDateTime(args.now, "now");
+    const runner = await requireRunnerByAuth(
+      ctx,
+      args.runnerId,
+      args.runnerAuthTokenHash
+    );
+    const resultPackage = parseResultPackage(args.resultPackage);
+    assertTerminalResultPackage(resultPackage, "failed");
+
+    return await writeTerminalResult(ctx, resultPackage, now, runner);
   }
 });
