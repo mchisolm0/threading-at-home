@@ -6,3 +6,4 @@ export function createWorkspaceLabel(area: WorkspaceArea): string {
 
 export * from "./contracts.js";
 export * from "./fixtures.js";
+export * from "./safety.js";

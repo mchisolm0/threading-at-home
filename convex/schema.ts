@@ -154,6 +154,8 @@ export default defineSchema({
     supportedCapabilities: v.array(v.string()),
     maxOutputBytes: v.number(),
     runnerAuthTokenHash: v.optional(v.string()),
+    status: v.optional(v.string()),
+    revokedAt: v.optional(v.string()),
     registeredAt: v.string(),
     lastSeenAt: v.string()
   })

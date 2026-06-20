@@ -20,6 +20,8 @@ export type RunnerRegistrationView = {
   readonly supportsPatchCapture: boolean;
   readonly supportedTaskTypes: readonly string[];
   readonly maxOutputBytes: number;
+  readonly status: string;
+  readonly revokedAt?: string;
   readonly registeredAt: string;
   readonly lastSeenAt: string;
 };

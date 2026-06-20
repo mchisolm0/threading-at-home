@@ -117,4 +117,36 @@ describe("maintainer task form builder", () => {
       message: "Project must be verified."
     });
   });
+
+  it("surfaces private beta safety errors before submit", () => {
+    const form = {
+      ...initialTaskForm(project.projectId),
+      title: "Patch production",
+      sandbox: "workspace-write" as const,
+      network: true,
+      allowPatches: true,
+      publicPosting: "automatic" as const,
+      resultVisibility: "public" as const,
+      prompt: "Run a bash script, commit a patch, and post a GitHub comment."
+    };
+    const result = buildTaskRequest({
+      form,
+      viewer,
+      projects: [project],
+      now: new Date("2026-06-18T12:00:00Z"),
+      id: "task-unsafe"
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.success ? [] : result.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ field: "prompt" }),
+        expect.objectContaining({ field: "sandbox" }),
+        expect.objectContaining({ field: "network" }),
+        expect.objectContaining({ field: "allowPatches" }),
+        expect.objectContaining({ field: "publicPosting" }),
+        expect.objectContaining({ field: "resultVisibility" })
+      ])
+    );
+  });
 });

@@ -70,6 +70,8 @@ export type RunnerRegistrationView = {
   readonly supportsPatchCapture: boolean;
   readonly supportedTaskTypes: readonly string[];
   readonly maxOutputBytes: number;
+  readonly status: string;
+  readonly revokedAt?: string;
   readonly registeredAt: string;
   readonly lastSeenAt: string;
 };
@@ -161,6 +163,20 @@ export type MaintainerResultDetailView = {
   readonly project: MaintainerResultListView["project"];
 };
 
+export type AuditEventView = {
+  readonly eventType: string;
+  readonly entityType: string;
+  readonly entityId: string;
+  readonly projectId?: string;
+  readonly taskRequestId?: string;
+  readonly runId?: string;
+  readonly leaseId?: string;
+  readonly runnerId?: string;
+  readonly occurredAt: string;
+  readonly actorScope?: string;
+  readonly metadata?: unknown;
+};
+
 export const convexApi = {
   users: {
     viewer: makeFunctionReference<"query", Record<string, never>, Viewer | null>(
@@ -210,6 +226,11 @@ export const convexApi = {
       { resultPackageId: string },
       MaintainerResultDetailView | null
     >("lifecycle:resultDetail"),
+    auditEvents: makeFunctionReference<
+      "query",
+      { projectId?: string; taskRequestId?: string; limit?: number },
+      AuditEventView[]
+    >("lifecycle:auditEvents"),
     createTask: makeFunctionReference<
       "mutation",
       { task: TaskRequest },
@@ -266,6 +287,16 @@ export const convexApi = {
       { tokenId: string; now: string },
       RunnerSetupTokenView
     >("volunteer:revokeRunnerSetupToken"),
+    revokeRunner: makeFunctionReference<
+      "mutation",
+      { runnerId: string; now: string },
+      RunnerRegistrationView
+    >("volunteer:revokeRunner"),
+    auditEvents: makeFunctionReference<
+      "query",
+      { runnerId?: string; limit?: number },
+      AuditEventView[]
+    >("volunteer:auditEvents"),
     exchangeRunnerSetupToken: makeFunctionReference<
       "mutation",
       {

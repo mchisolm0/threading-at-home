@@ -3,6 +3,10 @@ export type RunnerSetupTokenExchangeCandidate = {
   readonly expiresAt?: string;
 };
 
+export type RunnerRegistrationStatusCandidate = {
+  readonly status?: string;
+};
+
 export function normalizeRunnerSetupTokenHash(tokenHash: string): string {
   if (!/^sha256:[a-f0-9]{64}$/i.test(tokenHash)) {
     throw new Error("Runner setup token hash must be a sha256 hex digest");
@@ -44,5 +48,13 @@ export function assertRunnerSetupTokenCanBeExchanged(
 
   if (token.expiresAt !== undefined && Date.parse(token.expiresAt) <= Date.parse(now)) {
     throw new Error("Runner setup token has expired");
+  }
+}
+
+export function assertRunnerRegistrationActive(
+  runner: RunnerRegistrationStatusCandidate
+): void {
+  if (runner.status === "revoked") {
+    throw new Error("Runner registration was revoked. Run login with a new setup token.");
   }
 }

@@ -4,6 +4,10 @@ import {
   parseTaskLease,
   parseTaskRequest,
   parseVolunteerPolicy,
+  assertNoSafetyIssues,
+  redactResultPackage,
+  validatePrivateBetaRateLimits,
+  validatePrivateBetaTaskRequest,
   type ResultPackage,
   type RunnerCapability,
   type TaskLease,
@@ -89,6 +93,19 @@ type MaintainerResultDetail = {
   readonly task: TaskRequest;
   readonly project: MaintainerResultProjectView;
 };
+type AuditEventView = {
+  readonly eventType: string;
+  readonly entityType: string;
+  readonly entityId: string;
+  readonly projectId?: string;
+  readonly taskRequestId?: string;
+  readonly runId?: string;
+  readonly leaseId?: string;
+  readonly runnerId?: string;
+  readonly occurredAt: string;
+  readonly actorScope: "maintainer" | "volunteer" | "runner" | "system";
+  readonly metadata?: Value;
+};
 
 const mutation = mutationGeneric;
 const internalMutation = internalMutationGeneric;
@@ -97,6 +114,8 @@ const defaultCleanupBatchSize = 100;
 const maximumCleanupBatchSize = 500;
 const defaultMaintainerResultLimit = 50;
 const maximumMaintainerResultLimit = 100;
+const defaultAuditEventLimit = 50;
+const maximumAuditEventLimit = 100;
 const defaultStaleRunAgeMs = 60 * 60 * 1000;
 const nonTerminalCleanupStatuses = ["queued", "leased", "running"] as const;
 
@@ -274,6 +293,23 @@ function maintainerResultLimit(limit: number | undefined): number {
   return limit;
 }
 
+function queryLimit(
+  value: number | undefined,
+  label: string,
+  defaultLimit: number,
+  maximumLimit: number
+): number {
+  if (value === undefined) {
+    return defaultLimit;
+  }
+
+  if (!Number.isInteger(value) || value < 1 || value > maximumLimit) {
+    throw new Error(`${label} must be an integer between 1 and ${maximumLimit}`);
+  }
+
+  return value;
+}
+
 function toConvexValue(value: unknown): Value {
   if (
     value === null ||
@@ -318,6 +354,53 @@ function withoutSystemFields(doc: StoredDoc): Record<string, Value> {
   }
 
   return result;
+}
+
+function runnerCapabilityFields(doc: StoredDoc): Record<string, Value> {
+  const capability = withoutSystemFields(doc);
+  delete capability.runnerAuthTokenHash;
+  delete capability.status;
+  delete capability.revokedAt;
+
+  return capability;
+}
+
+function dayStart(value: string): string {
+  return `${new Date(Date.parse(value)).toISOString().slice(0, 10)}T00:00:00.000Z`;
+}
+
+function occurredToday(value: Value, now: string): boolean {
+  return (
+    typeof value === "string" &&
+    Date.parse(value) >= Date.parse(dayStart(now)) &&
+    Date.parse(value) <= Date.parse(now)
+  );
+}
+
+function auditEventView(event: StoredDoc, actorUserId: string): AuditEventView {
+  const actorScope =
+    event.actorUserId === actorUserId
+      ? "maintainer"
+      : event.runnerId !== undefined
+        ? "runner"
+        : event.actorUserId !== undefined
+          ? "volunteer"
+          : "system";
+
+  return {
+    eventType: String(event.eventType),
+    entityType: String(event.entityType),
+    entityId: String(event.entityId),
+    projectId: typeof event.projectId === "string" ? event.projectId : undefined,
+    taskRequestId:
+      typeof event.taskRequestId === "string" ? event.taskRequestId : undefined,
+    runId: typeof event.runId === "string" ? event.runId : undefined,
+    leaseId: typeof event.leaseId === "string" ? event.leaseId : undefined,
+    runnerId: typeof event.runnerId === "string" ? event.runnerId : undefined,
+    occurredAt: String(event.occurredAt),
+    actorScope,
+    metadata: event.metadata
+  };
 }
 
 function taskSummaryView(task: TaskRequest): MaintainerResultTaskSummary {
@@ -496,6 +579,51 @@ async function runCountForTask(
   return runs.length;
 }
 
+async function projectActiveTaskCount(
+  ctx: MutationCtx,
+  projectId: string
+): Promise<number> {
+  const tasks = (await ctx.db
+    .query("taskRequests")
+    .withIndex("by_project_status", (q) => {
+      const range = q as unknown as IndexRangeBuilder<
+        Record<"projectId" | "status", string> & Record<string, Value>,
+        ["projectId", "status"]
+      >;
+
+      return range.eq("projectId", projectId).eq("status", "active");
+    })
+    .collect()) as StoredDoc[];
+
+  return tasks.length;
+}
+
+async function projectTasksCreatedToday(
+  ctx: MutationCtx,
+  projectId: string,
+  now: string
+): Promise<number> {
+  const tasks = (await ctx.db
+    .query("taskRequests")
+    .withIndex("by_project_status", (q) => q.eq("projectId", projectId))
+    .collect()) as StoredDoc[];
+
+  return tasks.filter((task) => occurredToday(task.createdAt, now)).length;
+}
+
+async function runsLeasedTodayFor(
+  ctx: MutationCtx,
+  field: "projectId" | "volunteerUserId",
+  value: string,
+  now: string
+): Promise<number> {
+  const runs = (await ctx.db.query("runs").collect()) as StoredDoc[];
+
+  return runs.filter(
+    (run) => run[field] === value && occurredToday(run.createdAt, now)
+  ).length;
+}
+
 async function subscriptionForTask(
   ctx: MutationCtx,
   volunteerUserId: string,
@@ -577,7 +705,21 @@ async function findLeaseableTask(
                   allowNetwork: subscription.allowNetwork as boolean,
                   allowPatches: subscription.allowPatches as boolean
                 },
-          policy: policy ?? undefined
+          policy: policy ?? undefined,
+          rateLimits: {
+            projectRunsLeasedToday: await runsLeasedTodayFor(
+              ctx,
+              "projectId",
+              task.projectId,
+              now
+            ),
+            volunteerRunsLeasedToday: await runsLeasedTodayFor(
+              ctx,
+              "volunteerUserId",
+              runner.volunteerUserId,
+              now
+            )
+          }
         },
         runner,
         now
@@ -707,9 +849,13 @@ export const createTask = mutation({
   handler: async (ctx, args) => {
     const actor = await requireAuthenticatedUser(ctx);
     const parsedTask = parseTaskRequest(args.task);
+    const now = isoNow();
     const task = {
       ...parsedTask,
-      createdByUserId: actor.userId
+      createdByUserId: actor.userId,
+      status: "draft",
+      createdAt: now,
+      updatedAt: now
     } satisfies TaskRequest;
     const project = await requireMaintainerProject(
       ctx,
@@ -728,12 +874,27 @@ export const createTask = mutation({
       throw new Error(`Task request already exists: ${task.id}`);
     }
 
+    if (parsedTask.status !== "draft") {
+      throw new Error("Task requests must be created as drafts before activation");
+    }
+
     if (
       project.repository !== undefined &&
       JSON.stringify(project.repository) !== JSON.stringify(task.repository)
     ) {
       throw new Error("Task repository must match the verified project");
     }
+
+    assertNoSafetyIssues(validatePrivateBetaTaskRequest(task));
+    assertNoSafetyIssues(
+      validatePrivateBetaRateLimits({
+        projectTasksCreatedToday: await projectTasksCreatedToday(
+          ctx,
+          task.projectId,
+          now
+        )
+      })
+    );
 
     await ctx.db.insert("taskRequests", task);
     await insertAuditEvent(ctx, {
@@ -880,6 +1041,69 @@ export const resultDetail = query({
   }
 });
 
+export const auditEvents = query({
+  args: {
+    projectId: v.optional(v.string()),
+    taskRequestId: v.optional(v.string()),
+    limit: v.optional(v.number())
+  },
+  handler: async (ctx, args): Promise<AuditEventView[]> => {
+    const actor = await requireAuthenticatedUser(ctx);
+    const limit = queryLimit(
+      args.limit,
+      "Audit event limit",
+      defaultAuditEventLimit,
+      maximumAuditEventLimit
+    );
+    const projectDocs = await collectByIndex<StoredDoc>(
+      ctx,
+      "projects",
+      "by_created_by",
+      "createdByUserId",
+      actor.userId
+    );
+    const projectIds = new Set(
+      projectDocs
+        .filter(
+          (project) =>
+            project.status === "verified" &&
+            (args.projectId === undefined || project.projectId === args.projectId)
+        )
+        .map((project) => String(project.projectId))
+    );
+
+    if (args.projectId !== undefined && !projectIds.has(args.projectId)) {
+      throw new Error("Only the project maintainer can view project audit events");
+    }
+
+    const events: StoredDoc[] = [];
+
+    for (const projectId of projectIds) {
+      events.push(
+        ...(await collectByIndex<StoredDoc>(
+          ctx,
+          "auditEvents",
+          "by_project",
+          "projectId",
+          projectId
+        ))
+      );
+    }
+
+    return events
+      .filter(
+        (event) =>
+          args.taskRequestId === undefined ||
+          event.taskRequestId === args.taskRequestId
+      )
+      .sort((left, right) =>
+        String(right.occurredAt).localeCompare(String(left.occurredAt))
+      )
+      .slice(0, limit)
+      .map((event) => auditEventView(event, actor.userId));
+  }
+});
+
 export const activateTask = mutation({
   args: {
     taskRequestId: v.string(),
@@ -888,7 +1112,8 @@ export const activateTask = mutation({
   },
   handler: async (ctx, args) => {
     const actor = await requireAuthenticatedUser(ctx);
-    const now = requireIsoNow(args.now);
+    requireIsoNow(args.now);
+    const now = isoNow();
 
     if (
       args.actorUserId !== undefined &&
@@ -924,6 +1149,13 @@ export const activateTask = mutation({
     if (parsedTask.expiresAt !== undefined && Date.parse(parsedTask.expiresAt) <= Date.parse(now)) {
       throw new Error("Cannot activate an expired task request");
     }
+
+    assertNoSafetyIssues(validatePrivateBetaTaskRequest(parsedTask));
+    assertNoSafetyIssues(
+      validatePrivateBetaRateLimits({
+        projectActiveTaskCount: await projectActiveTaskCount(ctx, parsedTask.projectId)
+      })
+    );
 
     await ctx.db.patch(task._id, { status: "active", updatedAt: now });
     await insertAuditEvent(ctx, {
@@ -1017,6 +1249,12 @@ export const registerRunner = mutation({
     if (existing === null) {
       await ctx.db.insert("runnerRegistrations", runner);
     } else {
+      if (existing.status === "revoked") {
+        throw new Error(
+          "Runner registration was revoked. Use a new setup token to reactivate it."
+        );
+      }
+
       await ctx.db.replace(existing._id, runner);
     }
 
@@ -1051,7 +1289,8 @@ export const leaseTask = mutation({
   },
   handler: async (ctx, args) => {
     const actor = await requireAuthenticatedUser(ctx);
-    const now = requireIsoNow(args.now);
+    requireIsoNow(args.now);
+    const now = isoNow();
     requireIsoNow(args.expiresAt);
 
     if (args.volunteerUserId !== actor.userId) {
@@ -1074,7 +1313,11 @@ export const leaseTask = mutation({
       throw new Error(`Runner not registered: ${args.runnerId}`);
     }
 
-    const runner = parseRunnerCapability(withoutSystemFields(runnerDoc));
+    if (runnerDoc.status === "revoked") {
+      throw new Error("Runner registration was revoked");
+    }
+
+    const runner = parseRunnerCapability(runnerCapabilityFields(runnerDoc));
 
     if (runner.volunteerUserId !== actor.userId) {
       throw new Error("Runner does not belong to authenticated user");
@@ -1233,16 +1476,17 @@ async function writeTerminalResult(
   now: string,
   actorUserId: string
 ): Promise<ResultPackage> {
+  const safeResultPackage = redactResultPackage(resultPackage);
   const runDoc = await uniqueByIndex<StoredDoc>(
     ctx,
     "runs",
     "by_run_id",
     "runId",
-    resultPackage.runId
+    safeResultPackage.runId
   );
 
   if (runDoc === null) {
-    throw new Error(`Run not found: ${resultPackage.runId}`);
+    throw new Error(`Run not found: ${safeResultPackage.runId}`);
   }
 
   if (isTerminalRunStatus(runDoc.status as string)) {
@@ -1254,32 +1498,33 @@ async function writeTerminalResult(
     "taskLeases",
     "by_lease_id",
     "leaseId",
-    resultPackage.leaseId
+    safeResultPackage.leaseId
   );
 
   if (leaseDoc === null) {
-    throw new Error(`Lease not found: ${resultPackage.leaseId}`);
+    throw new Error(`Lease not found: ${safeResultPackage.leaseId}`);
   }
 
   const lease = parseTaskLease(withoutSystemFields(leaseDoc));
-  assertLeaseCanReceiveTerminalResult(lease, now, resultPackage.completedAt);
+  assertLeaseCanReceiveTerminalResult(lease, now, safeResultPackage.completedAt);
 
   if (lease.volunteerUserId !== actorUserId) {
     throw new Error("Lease does not belong to authenticated user");
   }
 
   if (
-    lease.runId !== resultPackage.runId ||
-    lease.taskRequestId !== resultPackage.taskRequestId ||
-    lease.projectId !== resultPackage.projectId
+    lease.runId !== safeResultPackage.runId ||
+    lease.taskRequestId !== safeResultPackage.taskRequestId ||
+    lease.projectId !== safeResultPackage.projectId
   ) {
     throw new Error("Result package does not match lease");
   }
 
   if (
-    (resultPackage.runnerId !== undefined && resultPackage.runnerId !== lease.runnerId) ||
-    (resultPackage.volunteerUserId !== undefined &&
-      resultPackage.volunteerUserId !== lease.volunteerUserId)
+    (safeResultPackage.runnerId !== undefined &&
+      safeResultPackage.runnerId !== lease.runnerId) ||
+    (safeResultPackage.volunteerUserId !== undefined &&
+      safeResultPackage.volunteerUserId !== lease.volunteerUserId)
   ) {
     throw new Error("Result package identity does not match lease");
   }
@@ -1289,38 +1534,38 @@ async function writeTerminalResult(
     "resultPackages",
     "by_result_package_id",
     "resultPackageId",
-    resultPackage.resultPackageId
+    safeResultPackage.resultPackageId
   );
 
   if (existingResultPackage !== null) {
-    throw new Error(`Result package already exists: ${resultPackage.resultPackageId}`);
+    throw new Error(`Result package already exists: ${safeResultPackage.resultPackageId}`);
   }
 
-  await ctx.db.insert("resultPackages", toConvexDocument(resultPackage));
+  await ctx.db.insert("resultPackages", toConvexDocument(safeResultPackage));
   await ctx.db.patch(runDoc._id, {
-    status: resultPackage.runStatus,
-    completedAt: resultPackage.completedAt,
+    status: safeResultPackage.runStatus,
+    completedAt: safeResultPackage.completedAt,
     updatedAt: now
   });
   await ctx.db.patch(leaseDoc._id, {
-    status: resultPackage.runStatus === "completed" ? "completed" : "released",
-    releasedAt: resultPackage.completedAt
+    status: safeResultPackage.runStatus === "completed" ? "completed" : "released",
+    releasedAt: safeResultPackage.completedAt
   });
   await insertAuditEvent(ctx, {
-    eventType: `run.${resultPackage.runStatus}`,
+    eventType: `run.${safeResultPackage.runStatus}`,
     entityType: "run",
-    entityId: resultPackage.runId,
-    projectId: resultPackage.projectId,
-    taskRequestId: resultPackage.taskRequestId,
-    runId: resultPackage.runId,
-    leaseId: resultPackage.leaseId,
+    entityId: safeResultPackage.runId,
+    projectId: safeResultPackage.projectId,
+    taskRequestId: safeResultPackage.taskRequestId,
+    runId: safeResultPackage.runId,
+    leaseId: safeResultPackage.leaseId,
     actorUserId,
-    runnerId: resultPackage.runnerId,
-    occurredAt: resultPackage.completedAt,
-    metadata: { resultPackageId: resultPackage.resultPackageId }
+    runnerId: safeResultPackage.runnerId,
+    occurredAt: safeResultPackage.completedAt,
+    metadata: { resultPackageId: safeResultPackage.resultPackageId }
   });
 
-  return resultPackage;
+  return safeResultPackage;
 }
 
 export const completeRun = mutation({
@@ -1330,7 +1575,8 @@ export const completeRun = mutation({
   },
   handler: async (ctx, args) => {
     const actor = await requireAuthenticatedUser(ctx);
-    const now = requireIsoNow(args.now);
+    requireIsoNow(args.now);
+    const now = isoNow();
     const resultPackage = parseResultPackage(args.resultPackage);
     assertTerminalResultPackage(resultPackage, "completed");
 
@@ -1345,7 +1591,8 @@ export const failRun = mutation({
   },
   handler: async (ctx, args) => {
     const actor = await requireAuthenticatedUser(ctx);
-    const now = requireIsoNow(args.now);
+    requireIsoNow(args.now);
+    const now = isoNow();
     const resultPackage = parseResultPackage(args.resultPackage);
     assertTerminalResultPackage(resultPackage, "failed");
 

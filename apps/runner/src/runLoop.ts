@@ -15,6 +15,7 @@ import {
 } from "@oss-capacity/codex";
 import {
   parseResultPackage,
+  redactResultPackage,
   type JsonObject,
   type ResultPackage,
   type TaskRequest,
@@ -402,7 +403,7 @@ function completedResultPackage(input: {
     input.codex.finalMessage?.slice(0, 8_000) ??
     "Codex completed the read-only task.";
 
-  return parseResultPackage({
+  return parseResultPackage(redactResultPackage({
     ...baseResultPackage(input),
     runStatus: "completed",
     repositoryCommitSha: input.workspace.repositoryCommitSha,
@@ -425,7 +426,7 @@ function completedResultPackage(input: {
       input.codex.structuredOutput?.json !== undefined && structuredOutput === undefined
         ? ["Structured output was not a JSON object and was omitted."]
         : []
-  });
+  }));
 }
 
 function failedResultPackage(input: {
@@ -435,14 +436,14 @@ function failedResultPackage(input: {
   readonly completedAt: string;
   readonly identityVisibility: ResultPackage["volunteerVisibility"];
 }): ResultPackage {
-  return parseResultPackage({
+  return parseResultPackage(redactResultPackage({
     ...baseResultPackage(input),
     runStatus: "failed",
     commandSummaries: [],
     artifacts: [],
     warnings: [],
     error: errorResult(input.error)
-  });
+  }));
 }
 
 function baseResultPackage(input: {
@@ -461,7 +462,7 @@ function baseResultPackage(input: {
     runStatus: "failed",
     taskSnapshotHash: input.lease.lease.taskSnapshotHash,
     promptHash: contentHash(input.lease.task.prompt),
-    sandbox: "read-only",
+    sandbox: "read-only" as const,
     startedAt: input.startedAt,
     completedAt: input.completedAt,
     resultVisibility: input.lease.task.reporting.visibility,

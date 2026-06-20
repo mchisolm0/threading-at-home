@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   assertRunnerAuthTokenHashMatches,
+  assertRunnerRegistrationActive,
   assertRunnerSetupTokenCanBeExchanged,
   normalizeRunnerAuthTokenHash,
   normalizeRunnerSetupTokenHash
@@ -68,5 +69,13 @@ describe("volunteer runner setup token helpers", () => {
         now
       )
     ).toThrow("Runner setup token has expired");
+  });
+
+  it("allows legacy or active runners and rejects revoked runners", () => {
+    expect(() => assertRunnerRegistrationActive({})).not.toThrow();
+    expect(() => assertRunnerRegistrationActive({ status: "active" })).not.toThrow();
+    expect(() =>
+      assertRunnerRegistrationActive({ status: "revoked" })
+    ).toThrow("Runner registration was revoked");
   });
 });

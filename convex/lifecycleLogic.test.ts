@@ -186,6 +186,26 @@ describe("lifecycle planning helpers", () => {
     ).toBe(false);
   });
 
+  it("rejects leases once private beta volunteer and project caps are reached", () => {
+    expect(
+      canLeaseTask(
+        {
+          task: exampleTaskRequest,
+          activeLeaseCount: 0,
+          runCount: 0,
+          subscription,
+          policy: enabledPolicy,
+          rateLimits: {
+            projectRunsLeasedToday: 50,
+            volunteerRunsLeasedToday: enabledPolicy.capacity.maxRunsPerDay
+          }
+        },
+        exampleRunnerCapability,
+        now
+      )
+    ).toBe(false);
+  });
+
   it("rejects leases outside the volunteer policy project allowlist", () => {
     expect(
       canLeaseTask(
@@ -356,6 +376,14 @@ describe("lifecycle planning helpers", () => {
         exampleTaskLease,
         "2026-06-18T12:31:00Z",
         "2026-06-18T12:20:00Z"
+      )
+    ).toThrow("Cannot write a result for expired lease");
+
+    expect(() =>
+      assertLeaseCanReceiveTerminalResult(
+        exampleTaskLease,
+        "2026-06-18T12:45:00Z",
+        "2026-06-18T12:10:00Z"
       )
     ).toThrow("Cannot write a result for expired lease");
 

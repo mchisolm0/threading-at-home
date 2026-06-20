@@ -5,6 +5,7 @@ import {
   parseTaskLease,
   parseTaskRequest,
   parseVolunteerPolicy,
+  redactResultPackage,
   sandboxModes,
   taskTypes,
   type ResultPackage,
@@ -31,6 +32,7 @@ import {
 } from "./lifecycleLogic.js";
 import {
   assertRunnerAuthTokenHashMatches,
+  assertRunnerRegistrationActive,
   assertRunnerSetupTokenCanBeExchanged,
   normalizeRunnerAuthTokenHash,
   normalizeRunnerSetupTokenHash
@@ -93,6 +95,8 @@ type RunnerRegistrationView = {
   readonly supportsPatchCapture: boolean;
   readonly supportedTaskTypes: readonly string[];
   readonly maxOutputBytes: number;
+  readonly status: string;
+  readonly revokedAt?: string;
   readonly registeredAt: string;
   readonly lastSeenAt: string;
 };
@@ -111,6 +115,18 @@ type RunnerConfigurationView = {
   readonly policy: VolunteerPolicy | null;
   readonly subscriptions: readonly RunnerConfigurationSubscriptionView[];
 };
+type VolunteerAuditEventView = {
+  readonly eventType: string;
+  readonly entityType: string;
+  readonly entityId: string;
+  readonly projectId?: string;
+  readonly taskRequestId?: string;
+  readonly runId?: string;
+  readonly leaseId?: string;
+  readonly runnerId?: string;
+  readonly occurredAt: string;
+  readonly metadata?: Value;
+};
 type TaskLeaseIndexDocument = Record<"taskRequestId" | "status", string> &
   Record<string, Value>;
 type VolunteerProjectSubscriptionIndexDocument = Record<
@@ -121,6 +137,8 @@ type VolunteerProjectSubscriptionIndexDocument = Record<
 
 const query = queryGeneric;
 const mutation = mutationGeneric;
+const defaultAuditEventLimit = 50;
+const maximumAuditEventLimit = 100;
 
 function requireIsoDateTime(value: string, fieldName: string): string {
   if (Number.isNaN(Date.parse(value))) {
@@ -207,6 +225,52 @@ function withoutSystemFields(doc: StoredDoc): Record<string, Value> {
   return result;
 }
 
+function runnerCapabilityFields(doc: StoredDoc): Record<string, Value> {
+  const capability = withoutSystemFields(doc);
+  delete capability.runnerAuthTokenHash;
+  delete capability.status;
+  delete capability.revokedAt;
+
+  return capability;
+}
+
+function runnerStatus(runner: StoredDoc): string {
+  return typeof runner.status === "string" ? runner.status : "active";
+}
+
+function assertRunnerNotRevoked(runner: StoredDoc): void {
+  assertRunnerRegistrationActive({ status: runnerStatus(runner) });
+}
+
+function dayStart(value: string): string {
+  return `${new Date(Date.parse(value)).toISOString().slice(0, 10)}T00:00:00.000Z`;
+}
+
+function occurredToday(value: Value, now: string): boolean {
+  return (
+    typeof value === "string" &&
+    Date.parse(value) >= Date.parse(dayStart(now)) &&
+    Date.parse(value) <= Date.parse(now)
+  );
+}
+
+function queryLimit(
+  value: number | undefined,
+  label: string,
+  defaultLimit: number,
+  maximumLimit: number
+): number {
+  if (value === undefined) {
+    return defaultLimit;
+  }
+
+  if (!Number.isInteger(value) || value < 1 || value > maximumLimit) {
+    throw new Error(`${label} must be an integer between 1 and ${maximumLimit}`);
+  }
+
+  return value;
+}
+
 async function requireAuthenticatedUser(
   ctx: QueryCtx | MutationCtx
 ): Promise<AuthenticatedUser> {
@@ -271,9 +335,7 @@ function subscriptionView(subscription: VolunteerSubscriptionRecord) {
 }
 
 function runnerView(runner: StoredDoc): RunnerRegistrationView {
-  const capability = withoutSystemFields(runner);
-  delete capability.runnerAuthTokenHash;
-  const parsed = parseRunnerCapability(capability);
+  const parsed = parseRunnerCapability(runnerCapabilityFields(runner));
 
   return {
     runnerId: parsed.runnerId,
@@ -287,6 +349,8 @@ function runnerView(runner: StoredDoc): RunnerRegistrationView {
     supportsPatchCapture: parsed.supportsPatchCapture,
     supportedTaskTypes: parsed.supportedTaskTypes,
     maxOutputBytes: parsed.maxOutputBytes,
+    status: runnerStatus(runner),
+    revokedAt: typeof runner.revokedAt === "string" ? runner.revokedAt : undefined,
     registeredAt: parsed.registeredAt,
     lastSeenAt: parsed.lastSeenAt
   };
@@ -365,8 +429,9 @@ async function requireRunnerByAuth(
   }
 
   requireRunnerAuth(runnerDoc, runnerAuthTokenHash);
+  assertRunnerNotRevoked(runnerDoc);
 
-  return parseRunnerCapability(withoutSystemFields(runnerDoc));
+  return parseRunnerCapability(runnerCapabilityFields(runnerDoc));
 }
 
 async function insertAuditEvent(
@@ -386,6 +451,85 @@ async function insertAuditEvent(
   }
 ): Promise<void> {
   await ctx.db.insert("auditEvents", toConvexDocument(event));
+}
+
+function volunteerAuditEventView(event: StoredDoc): VolunteerAuditEventView {
+  return {
+    eventType: String(event.eventType),
+    entityType: String(event.entityType),
+    entityId: String(event.entityId),
+    projectId: typeof event.projectId === "string" ? event.projectId : undefined,
+    taskRequestId:
+      typeof event.taskRequestId === "string" ? event.taskRequestId : undefined,
+    runId: typeof event.runId === "string" ? event.runId : undefined,
+    leaseId: typeof event.leaseId === "string" ? event.leaseId : undefined,
+    runnerId: typeof event.runnerId === "string" ? event.runnerId : undefined,
+    occurredAt: String(event.occurredAt),
+    metadata: event.metadata
+  };
+}
+
+async function revokeActiveRunnerLeases(
+  ctx: MutationCtx,
+  runnerId: string,
+  volunteerUserId: string,
+  now: string
+): Promise<number> {
+  const leases = (await ctx.db
+    .query("taskLeases")
+    .withIndex("by_runner_status", (q) => {
+      const range = q as unknown as IndexRangeBuilder<
+        Record<"runnerId" | "status", string> & Record<string, Value>,
+        ["runnerId", "status"]
+      >;
+
+      return range.eq("runnerId", runnerId).eq("status", "active");
+    })
+    .collect()) as StoredDoc[];
+  let revokedCount = 0;
+
+  for (const leaseDoc of leases) {
+    const lease = parseTaskLease(withoutSystemFields(leaseDoc));
+
+    if (lease.volunteerUserId !== volunteerUserId) {
+      continue;
+    }
+
+    const runDoc = (await ctx.db
+      .query("runs")
+      .withIndex("by_run_id", (q) => q.eq("runId", lease.runId))
+      .unique()) as StoredDoc | null;
+
+    await ctx.db.patch(leaseDoc._id, {
+      status: "revoked",
+      releasedAt: now
+    });
+
+    if (runDoc !== null && !isTerminalRunStatus(runDoc.status as string)) {
+      await ctx.db.patch(runDoc._id, {
+        status: "expired",
+        completedAt: now,
+        updatedAt: now
+      });
+    }
+
+    await insertAuditEvent(ctx, {
+      eventType: "lease.revoked",
+      entityType: "taskLease",
+      entityId: lease.leaseId,
+      projectId: lease.projectId,
+      taskRequestId: lease.taskRequestId,
+      runId: lease.runId,
+      leaseId: lease.leaseId,
+      actorUserId: volunteerUserId,
+      runnerId,
+      occurredAt: now,
+      metadata: { reason: "runner_revoked" }
+    });
+    revokedCount += 1;
+  }
+
+  return revokedCount;
 }
 
 async function activeLeaseCountForTask(
@@ -423,6 +567,19 @@ async function runCountForTask(
     .collect()) as StoredDoc[];
 
   return runs.length;
+}
+
+async function runsLeasedTodayFor(
+  ctx: QueryCtx | MutationCtx,
+  field: "projectId" | "volunteerUserId",
+  value: string,
+  now: string
+): Promise<number> {
+  const runs = (await ctx.db.query("runs").collect()) as StoredDoc[];
+
+  return runs.filter(
+    (run) => run[field] === value && occurredToday(run.createdAt, now)
+  ).length;
 }
 
 async function subscriptionForTask(
@@ -494,7 +651,21 @@ async function findLeaseableTask(
                   allowNetwork: subscription.allowNetwork as boolean,
                   allowPatches: subscription.allowPatches as boolean
                 },
-          policy: policy ?? undefined
+          policy: policy ?? undefined,
+          rateLimits: {
+            projectRunsLeasedToday: await runsLeasedTodayFor(
+              ctx,
+              "projectId",
+              task.projectId,
+              now
+            ),
+            volunteerRunsLeasedToday: await runsLeasedTodayFor(
+              ctx,
+              "volunteerUserId",
+              runner.volunteerUserId,
+              now
+            )
+          }
         },
         runner,
         now
@@ -513,13 +684,14 @@ async function writeTerminalResult(
   now: string,
   runner: RunnerCapability
 ): Promise<ResultPackage> {
+  const safeResultPackage = redactResultPackage(resultPackage);
   const runDoc = (await ctx.db
     .query("runs")
-    .withIndex("by_run_id", (q) => q.eq("runId", resultPackage.runId))
+    .withIndex("by_run_id", (q) => q.eq("runId", safeResultPackage.runId))
     .unique()) as StoredDoc | null;
 
   if (runDoc === null) {
-    throw new Error(`Run not found: ${resultPackage.runId}`);
+    throw new Error(`Run not found: ${safeResultPackage.runId}`);
   }
 
   if (isTerminalRunStatus(runDoc.status as string)) {
@@ -528,15 +700,15 @@ async function writeTerminalResult(
 
   const leaseDoc = (await ctx.db
     .query("taskLeases")
-    .withIndex("by_lease_id", (q) => q.eq("leaseId", resultPackage.leaseId))
+    .withIndex("by_lease_id", (q) => q.eq("leaseId", safeResultPackage.leaseId))
     .unique()) as StoredDoc | null;
 
   if (leaseDoc === null) {
-    throw new Error(`Lease not found: ${resultPackage.leaseId}`);
+    throw new Error(`Lease not found: ${safeResultPackage.leaseId}`);
   }
 
   const lease = parseTaskLease(withoutSystemFields(leaseDoc));
-  assertLeaseCanReceiveTerminalResult(lease, now, resultPackage.completedAt);
+  assertLeaseCanReceiveTerminalResult(lease, now, safeResultPackage.completedAt);
 
   if (
     lease.runnerId !== runner.runnerId ||
@@ -546,18 +718,18 @@ async function writeTerminalResult(
   }
 
   if (
-    lease.runId !== resultPackage.runId ||
-    lease.taskRequestId !== resultPackage.taskRequestId ||
-    lease.projectId !== resultPackage.projectId
+    lease.runId !== safeResultPackage.runId ||
+    lease.taskRequestId !== safeResultPackage.taskRequestId ||
+    lease.projectId !== safeResultPackage.projectId
   ) {
     throw new Error("Result package does not match lease");
   }
 
   if (
-    (resultPackage.runnerId !== undefined &&
-      resultPackage.runnerId !== runner.runnerId) ||
-    (resultPackage.volunteerUserId !== undefined &&
-      resultPackage.volunteerUserId !== runner.volunteerUserId)
+    (safeResultPackage.runnerId !== undefined &&
+      safeResultPackage.runnerId !== runner.runnerId) ||
+    (safeResultPackage.volunteerUserId !== undefined &&
+      safeResultPackage.volunteerUserId !== runner.volunteerUserId)
   ) {
     throw new Error("Result package identity does not match runner");
   }
@@ -565,39 +737,39 @@ async function writeTerminalResult(
   const existingResultPackage = (await ctx.db
     .query("resultPackages")
     .withIndex("by_result_package_id", (q) =>
-      q.eq("resultPackageId", resultPackage.resultPackageId)
+      q.eq("resultPackageId", safeResultPackage.resultPackageId)
     )
     .unique()) as StoredDoc | null;
 
   if (existingResultPackage !== null) {
-    throw new Error(`Result package already exists: ${resultPackage.resultPackageId}`);
+    throw new Error(`Result package already exists: ${safeResultPackage.resultPackageId}`);
   }
 
-  await ctx.db.insert("resultPackages", toConvexDocument(resultPackage));
+  await ctx.db.insert("resultPackages", toConvexDocument(safeResultPackage));
   await ctx.db.patch(runDoc._id, {
-    status: resultPackage.runStatus,
-    completedAt: resultPackage.completedAt,
+    status: safeResultPackage.runStatus,
+    completedAt: safeResultPackage.completedAt,
     updatedAt: now
   });
   await ctx.db.patch(leaseDoc._id, {
-    status: resultPackage.runStatus === "completed" ? "completed" : "released",
-    releasedAt: resultPackage.completedAt
+    status: safeResultPackage.runStatus === "completed" ? "completed" : "released",
+    releasedAt: safeResultPackage.completedAt
   });
   await insertAuditEvent(ctx, {
-    eventType: `run.${resultPackage.runStatus}`,
+    eventType: `run.${safeResultPackage.runStatus}`,
     entityType: "run",
-    entityId: resultPackage.runId,
-    projectId: resultPackage.projectId,
-    taskRequestId: resultPackage.taskRequestId,
-    runId: resultPackage.runId,
-    leaseId: resultPackage.leaseId,
+    entityId: safeResultPackage.runId,
+    projectId: safeResultPackage.projectId,
+    taskRequestId: safeResultPackage.taskRequestId,
+    runId: safeResultPackage.runId,
+    leaseId: safeResultPackage.leaseId,
     actorUserId: runner.volunteerUserId,
-    runnerId: resultPackage.runnerId,
-    occurredAt: resultPackage.completedAt,
-    metadata: { resultPackageId: resultPackage.resultPackageId }
+    runnerId: safeResultPackage.runnerId,
+    occurredAt: safeResultPackage.completedAt,
+    metadata: { resultPackageId: safeResultPackage.resultPackageId }
   });
 
-  return resultPackage;
+  return safeResultPackage;
 }
 
 function runnerTokenView(token: RunnerSetupTokenRecord) {
@@ -650,6 +822,36 @@ export const dashboard = query({
         .map(runnerTokenView)
         .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
     };
+  }
+});
+
+export const auditEvents = query({
+  args: {
+    runnerId: v.optional(v.string()),
+    limit: v.optional(v.number())
+  },
+  handler: async (ctx, args): Promise<VolunteerAuditEventView[]> => {
+    const actor = await requireAuthenticatedUser(ctx);
+    const limit = queryLimit(
+      args.limit,
+      "Audit event limit",
+      defaultAuditEventLimit,
+      maximumAuditEventLimit
+    );
+    const events = (await ctx.db
+      .query("auditEvents")
+      .withIndex("by_occurred_at")
+      .order("desc")
+      .take(limit * 5)) as StoredDoc[];
+
+    return events
+      .filter(
+        (event) =>
+          event.actorUserId === actor.userId &&
+          (args.runnerId === undefined || event.runnerId === args.runnerId)
+      )
+      .slice(0, limit)
+      .map(volunteerAuditEventView);
   }
 });
 
@@ -837,6 +1039,57 @@ export const revokeRunnerSetupToken = mutation({
   }
 });
 
+export const revokeRunner = mutation({
+  args: {
+    runnerId: v.string(),
+    now: v.string()
+  },
+  handler: async (ctx, args): Promise<RunnerRegistrationView> => {
+    const actor = await requireAuthenticatedUser(ctx);
+    const now = requireIsoDateTime(args.now, "now");
+    const runner = await runnerById(ctx, args.runnerId);
+
+    if (runner === null) {
+      throw new Error(`Runner registration not found: ${args.runnerId}`);
+    }
+
+    if (runner.volunteerUserId !== actor.userId) {
+      throw new Error("Runner registration does not belong to authenticated user");
+    }
+
+    if (runnerStatus(runner) !== "revoked") {
+      const revokedLeaseCount = await revokeActiveRunnerLeases(
+        ctx,
+        args.runnerId,
+        actor.userId,
+        now
+      );
+
+      await ctx.db.patch(runner._id, {
+        status: "revoked",
+        revokedAt: now,
+        lastSeenAt: now
+      });
+      await insertAuditEvent(ctx, {
+        eventType: "runner.revoked",
+        entityType: "runnerRegistration",
+        entityId: args.runnerId,
+        actorUserId: actor.userId,
+        runnerId: args.runnerId,
+        occurredAt: now,
+        metadata: { revokedLeaseCount }
+      });
+    }
+
+    return runnerView({
+      ...runner,
+      status: "revoked",
+      revokedAt: typeof runner.revokedAt === "string" ? runner.revokedAt : now,
+      lastSeenAt: now
+    });
+  }
+});
+
 export const exchangeRunnerSetupToken = mutation({
   args: {
     tokenHash: v.string(),
@@ -878,12 +1131,14 @@ export const exchangeRunnerSetupToken = mutation({
     if (existingRunner === null) {
       await ctx.db.insert("runnerRegistrations", {
         ...toConvexDocument(runner),
-        runnerAuthTokenHash
+        runnerAuthTokenHash,
+        status: "active"
       });
     } else {
       await ctx.db.replace(existingRunner._id, {
         ...toConvexDocument(runner),
-        runnerAuthTokenHash
+        runnerAuthTokenHash,
+        status: "active"
       });
     }
 
@@ -895,6 +1150,7 @@ export const exchangeRunnerSetupToken = mutation({
     return runnerView({
       ...toConvexDocument(runner),
       runnerAuthTokenHash,
+      status: "active",
       _id: existingRunner?._id ?? token._id
     } as StoredDoc);
   }
@@ -916,6 +1172,7 @@ export const heartbeatRunner = mutation({
     }
 
     requireRunnerAuth(existingRunner, args.runnerAuthTokenHash);
+    assertRunnerNotRevoked(existingRunner);
 
     if (typeof existingRunner.volunteerUserId !== "string") {
       throw new Error("Runner registration is missing a volunteer owner");
@@ -934,12 +1191,14 @@ export const heartbeatRunner = mutation({
 
     await ctx.db.replace(existingRunner._id, {
       ...toConvexDocument(runner),
-      runnerAuthTokenHash
+      runnerAuthTokenHash,
+      status: "active"
     });
 
     return runnerView({
       ...toConvexDocument(runner),
       runnerAuthTokenHash,
+      status: "active",
       _id: existingRunner._id
     } as StoredDoc);
   }
@@ -958,6 +1217,7 @@ export const runnerConfiguration = query({
     }
 
     requireRunnerAuth(runner, args.runnerAuthTokenHash);
+    assertRunnerNotRevoked(runner);
 
     return await runnerConfigurationView(ctx, runner);
   }
@@ -997,7 +1257,8 @@ export const leaseEligibleTask = mutation({
     readonly task: TaskRequest;
     readonly lease: TaskLease;
   } | null> => {
-    const now = requireIsoDateTime(args.now, "now");
+    requireIsoDateTime(args.now, "now");
+    const now = new Date(Date.now()).toISOString();
     requireIsoDateTime(args.expiresAt, "expiresAt");
 
     if (Date.parse(args.expiresAt) <= Date.parse(now)) {
@@ -1087,7 +1348,8 @@ export const completeRun = mutation({
     now: v.string()
   },
   handler: async (ctx, args): Promise<ResultPackage> => {
-    const now = requireIsoDateTime(args.now, "now");
+    requireIsoDateTime(args.now, "now");
+    const now = new Date(Date.now()).toISOString();
     const runner = await requireRunnerByAuth(
       ctx,
       args.runnerId,
@@ -1108,7 +1370,8 @@ export const failRun = mutation({
     now: v.string()
   },
   handler: async (ctx, args): Promise<ResultPackage> => {
-    const now = requireIsoDateTime(args.now, "now");
+    requireIsoDateTime(args.now, "now");
+    const now = new Date(Date.now()).toISOString();
     const runner = await requireRunnerByAuth(
       ctx,
       args.runnerId,
