@@ -57,6 +57,9 @@ Run the runner placeholder:
 pnpm --filter @oss-capacity/runner dev
 ```
 
+For the first end-to-end read-only MVP path, follow
+[docs/first-read-only-task-loop-demo.md](docs/first-read-only-task-loop-demo.md).
+
 ## GitHub App Installation Verification
 
 Project registration requires a GitHub App installation in addition to GitHub
