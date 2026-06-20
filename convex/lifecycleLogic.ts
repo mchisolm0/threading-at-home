@@ -1,4 +1,5 @@
 import type {
+  RateLimitSnapshot,
   ResultPackage,
   RunnerCapability,
   RunnerCapabilityKey,
@@ -6,6 +7,7 @@ import type {
   TaskRequest,
   VolunteerPolicy
 } from "@oss-capacity/core";
+import { validatePrivateBetaRateLimits } from "@oss-capacity/core";
 
 export type LeaseCandidateTask = Pick<
   TaskRequest,
@@ -39,6 +41,7 @@ export type LeaseCandidateState = {
     | "capacity"
     | "permissions"
   >;
+  readonly rateLimits?: RateLimitSnapshot;
 };
 
 export type StaleRunCleanupDecision =
@@ -210,7 +213,11 @@ export function canLeaseTask(
     state.runCount < state.task.maxRuns &&
     supportsTask(runner, state.task) &&
     subscriptionAllowsTask(state.subscription, state.task) &&
-    policyAllowsTask(state.policy, state.task)
+    policyAllowsTask(state.policy, state.task) &&
+    validatePrivateBetaRateLimits({
+      ...state.rateLimits,
+      volunteerMaxRunsPerDay: state.policy?.capacity.maxRunsPerDay
+    }).length === 0
   );
 }
 

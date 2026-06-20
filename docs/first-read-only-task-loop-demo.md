@@ -41,8 +41,8 @@ Open `http://localhost:3000`, sign in with GitHub, and open the dashboard.
    - `Patches`: unchecked
    - `Public posting`: `maintainer only`
    - `Result visibility`: `maintainer only`
-3. Enter a small analysis or triage prompt.
-4. Keep or edit the output schema as a JSON object.
+3. Enter a small analysis or triage prompt. Private-beta safety linting rejects prompts that ask Codex to post publicly, write patches, run shell commands or scripts, use network access, request credentials, or inspect volunteer-local secret paths.
+4. Keep or edit the output schema as a JSON object. Small tasks are capped at 4,000 prompt characters, 6,000 serialized output-schema characters, and 3 runs.
 5. Click `Save and activate`.
 
 ## Volunteer Script
@@ -75,6 +75,8 @@ pnpm --filter @oss-capacity/runner exec oss-capacity-runner diagnose
 pnpm --filter @oss-capacity/runner exec oss-capacity-runner run-once
 ```
 
+If a volunteer revokes a registered runner in the dashboard, subsequent `diagnose`, `heartbeat`, or `run-once` calls fail with a revoked-runner diagnostic. Re-run `login` with a fresh setup token to register that machine again.
+
 Expected `run-once` output:
 
 - `status` is `completed` for a successful Codex run, or `failed` if Codex returned a terminal failure that was uploaded.
@@ -90,6 +92,7 @@ Return to the dashboard and confirm:
 - The inbox contains a new result for the activated task.
 - The result detail page shows the structured output and command summary.
 - No GitHub issue comment, pull request, branch, or public post was created by this flow.
+- Audit panels show scoped task, lease, run, setup-token, and runner-revocation events without runner auth hashes or volunteer Codex credentials.
 
 ## Local Mock Verification
 

@@ -9,6 +9,7 @@ import {
   type TaskRequest,
   type TaskSize,
   type TaskType,
+  validatePrivateBetaTaskRequest,
   validateTaskRequest
 } from "@oss-capacity/core";
 
@@ -193,6 +194,30 @@ function requiredCapabilities(input: {
 }
 
 function issuePathToField(path: string): string {
+  if (path === "permissions.sandbox") {
+    return "sandbox";
+  }
+
+  if (path === "permissions.network") {
+    return "network";
+  }
+
+  if (path === "permissions.allowPatches") {
+    return "allowPatches";
+  }
+
+  if (path === "permissions.publicPosting") {
+    return "publicPosting";
+  }
+
+  if (path === "reporting.visibility") {
+    return "resultVisibility";
+  }
+
+  if (path === "reporting.destination" || path === "requiredCapabilities") {
+    return "form";
+  }
+
   const [head] = path.split(".");
 
   return head.length > 0 ? head : "form";
@@ -307,6 +332,18 @@ export function buildTaskRequest(input: {
     return {
       success: false,
       issues: validation.issues.map((issue) => ({
+        field: issuePathToField(issue.path),
+        message: issue.message
+      }))
+    };
+  }
+
+  const safetyIssues = validatePrivateBetaTaskRequest(validation.data);
+
+  if (safetyIssues.length > 0) {
+    return {
+      success: false,
+      issues: safetyIssues.map((issue) => ({
         field: issuePathToField(issue.path),
         message: issue.message
       }))

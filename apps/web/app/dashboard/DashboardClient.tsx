@@ -206,6 +206,19 @@ export function DashboardClient() {
     convexApi.volunteer.dashboard,
     hasViewer ? {} : "skip"
   );
+  const maintainerAuditEvents = useQuery(
+    convexApi.lifecycle.auditEvents,
+    hasViewer
+      ? {
+          limit: 25,
+          ...(projectFilter === "all" ? {} : { projectId: projectFilter })
+        }
+      : "skip"
+  );
+  const volunteerAuditEvents = useQuery(
+    convexApi.volunteer.auditEvents,
+    hasViewer ? { limit: 25 } : "skip"
+  );
   const registerProject = useAction(convexApi.github.registerProject);
   const createTask = useMutation(convexApi.lifecycle.createTask);
   const activateTask = useMutation(convexApi.lifecycle.activateTask);
@@ -218,6 +231,7 @@ export function DashboardClient() {
   const revokeRunnerSetupToken = useMutation(
     convexApi.volunteer.revokeRunnerSetupToken
   );
+  const revokeRunner = useMutation(convexApi.volunteer.revokeRunner);
   const { signOut } = useAuthActions();
   const installUrl = process.env.NEXT_PUBLIC_GITHUB_APP_INSTALL_URL;
   const [repositoryFullName, setRepositoryFullName] = useState("");
@@ -231,6 +245,7 @@ export function DashboardClient() {
   const [pendingSubscriptionId, setPendingSubscriptionId] = useState<string | null>(null);
   const [runnerTokenLabel, setRunnerTokenLabel] = useState("");
   const [pendingRunnerTokenId, setPendingRunnerTokenId] = useState<string | null>(null);
+  const [pendingRunnerId, setPendingRunnerId] = useState<string | null>(null);
   const [runnerSetupSecret, setRunnerSetupSecret] =
     useState<RunnerSetupSecret | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -510,6 +525,23 @@ export function DashboardClient() {
     }
   }
 
+  async function revokeRunnerRegistration(runnerId: string) {
+    setMessage(null);
+    setPendingRunnerId(runnerId);
+
+    try {
+      await revokeRunner({
+        runnerId,
+        now: new Date().toISOString()
+      });
+      setMessage("Runner revoked");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Runner revocation failed");
+    } finally {
+      setPendingRunnerId(null);
+    }
+  }
+
   if (viewer === undefined) {
     return <p className="loading-copy">Loading session...</p>;
   }
@@ -523,6 +555,8 @@ export function DashboardClient() {
     installations === undefined ||
     tasks === undefined ||
     results === undefined ||
+    maintainerAuditEvents === undefined ||
+    volunteerAuditEvents === undefined ||
     volunteerDashboard === undefined ||
     volunteerForm === null
   ) {
@@ -678,6 +712,7 @@ export function DashboardClient() {
               <p className="eyebrow">Tasks</p>
               <h2>Request work</h2>
             </div>
+            <FieldErrors issues={validationIssues} field="form" />
 
             <div className="form-grid">
               <div className="field full">
@@ -741,6 +776,7 @@ export function DashboardClient() {
                     </option>
                   ))}
                 </select>
+                <FieldErrors issues={validationIssues} field="type" />
               </div>
 
               <div className="field">
@@ -870,6 +906,7 @@ export function DashboardClient() {
                     </option>
                   ))}
                 </select>
+                <FieldErrors issues={validationIssues} field="sandbox" />
               </div>
 
               <div className="field">
@@ -890,6 +927,7 @@ export function DashboardClient() {
                     </option>
                   ))}
                 </select>
+                <FieldErrors issues={validationIssues} field="publicPosting" />
               </div>
 
               <div className="field">
@@ -910,6 +948,7 @@ export function DashboardClient() {
                     </option>
                   ))}
                 </select>
+                <FieldErrors issues={validationIssues} field="resultVisibility" />
               </div>
 
               <div className="toggle-row">
@@ -923,6 +962,7 @@ export function DashboardClient() {
                   />
                   Network
                 </label>
+                <FieldErrors issues={validationIssues} field="network" />
                 <label>
                   <input
                     type="checkbox"
@@ -933,6 +973,7 @@ export function DashboardClient() {
                   />
                   Patches
                 </label>
+                <FieldErrors issues={validationIssues} field="allowPatches" />
               </div>
 
               <div className="field full">
@@ -1143,6 +1184,29 @@ export function DashboardClient() {
               </div>
             ))}
           </div>
+        )}
+      </div>
+
+      <div className="panel">
+        <div className="panel-heading">
+          <p className="eyebrow">Audit</p>
+          <h2>Maintainer events</h2>
+        </div>
+        {maintainerAuditEvents.length === 0 ? (
+          <span className="empty-state">No maintainer audit events.</span>
+        ) : (
+          <ul className="repo-list">
+            {maintainerAuditEvents.map((event) => (
+              <li key={`${event.eventType}-${event.entityId}-${event.occurredAt}`}>
+                <strong>{formatLabel(event.eventType)}</strong>
+                <StatusBadge status={event.actorScope ?? "system"} />
+                <small>
+                  {event.projectId ?? "no project"} · {event.entityType}{" "}
+                  {event.entityId} · {event.occurredAt}
+                </small>
+              </li>
+            ))}
+          </ul>
         )}
       </div>
 
@@ -1606,9 +1670,46 @@ export function DashboardClient() {
                 {volunteerDashboard.runners.map((runner) => (
                   <li key={runner.runnerId}>
                     <strong>{runner.displayName ?? runner.runnerId}</strong>
-                    <StatusBadge status={runner.codexAuthMode} />
+                    <StatusBadge status={runner.status} />
                     <small>
                       {runner.platform}/{runner.architecture} · {runner.lastSeenAt}
+                      {runner.revokedAt === undefined
+                        ? ""
+                        : ` · Revoked ${runner.revokedAt}`}
+                    </small>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={
+                        runner.status === "revoked" ||
+                        pendingRunnerId === runner.runnerId
+                      }
+                      onClick={() => void revokeRunnerRegistration(runner.runnerId)}
+                    >
+                      Revoke
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="panel">
+            <div className="panel-heading">
+              <p className="eyebrow">Audit</p>
+              <h2>Volunteer events</h2>
+            </div>
+            {volunteerAuditEvents.length === 0 ? (
+              <span className="empty-state">No volunteer audit events.</span>
+            ) : (
+              <ul className="repo-list">
+                {volunteerAuditEvents.map((event) => (
+                  <li key={`${event.eventType}-${event.entityId}-${event.occurredAt}`}>
+                    <strong>{formatLabel(event.eventType)}</strong>
+                    <StatusBadge status={event.runnerId === undefined ? "user" : "runner"} />
+                    <small>
+                      {event.projectId ?? "no project"} · {event.entityType}{" "}
+                      {event.entityId} · {event.occurredAt}
                     </small>
                   </li>
                 ))}
