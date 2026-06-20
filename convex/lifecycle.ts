@@ -3,10 +3,12 @@ import {
   parseRunnerCapability,
   parseTaskLease,
   parseTaskRequest,
+  parseVolunteerPolicy,
   type ResultPackage,
   type RunnerCapability,
   type TaskLease,
-  type TaskRequest
+  type TaskRequest,
+  type VolunteerPolicy
 } from "@oss-capacity/core";
 import { getAuthUserId } from "@convex-dev/auth/server";
 import {
@@ -315,12 +317,25 @@ async function subscriptionForTask(
     .unique()) as StoredDoc | null;
 }
 
+async function policyForVolunteer(
+  ctx: MutationCtx,
+  volunteerUserId: string
+): Promise<VolunteerPolicy | null> {
+  const policy = (await ctx.db
+    .query("volunteerPolicies")
+    .withIndex("by_volunteer", (q) => q.eq("volunteerUserId", volunteerUserId))
+    .unique()) as StoredDoc | null;
+
+  return policy === null ? null : parseVolunteerPolicy(withoutSystemFields(policy));
+}
+
 async function findLeaseableTask(
   ctx: MutationCtx,
   runner: RunnerCapability,
   now: string,
   taskRequestId?: string
 ): Promise<TaskRequest | null> {
+  const policy = await policyForVolunteer(ctx, runner.volunteerUserId);
   const candidates = taskRequestId
     ? [
         await uniqueByIndex<StoredDoc>(
@@ -364,7 +379,8 @@ async function findLeaseableTask(
                   maxSandbox: subscription.maxSandbox as string,
                   allowNetwork: subscription.allowNetwork as boolean,
                   allowPatches: subscription.allowPatches as boolean
-                }
+                },
+          policy: policy ?? undefined
         },
         runner,
         now

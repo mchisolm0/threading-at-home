@@ -11,6 +11,7 @@ import {
   assertLeaseCanReceiveTerminalResult,
   assertTerminalResultPackage,
   canLeaseTask,
+  type LeaseCandidateState,
   shouldExpireLease,
   shouldExpireStaleRun
 } from "./lifecycleLogic.js";
@@ -25,6 +26,23 @@ const subscription = {
   allowPatches: false
 };
 
+const enabledPolicy = {
+  enabled: true,
+  projectAllowlist: [exampleTaskRequest.projectId],
+  taskTypeAllowlist: ["analysis", "triage", "docs_draft"],
+  capacity: {
+    maxUsedPercent: 80,
+    onlyIfResetsWithinMinutes: 180,
+    maxRunsPerDay: 3,
+    maxEstimatedSize: "small"
+  },
+  permissions: {
+    maxSandbox: "read-only",
+    allowNetwork: false,
+    allowPatches: false
+  }
+} satisfies LeaseCandidateState["policy"];
+
 describe("lifecycle planning helpers", () => {
   it("allows a subscribed runner to lease a compatible active task", () => {
     expect(
@@ -33,7 +51,8 @@ describe("lifecycle planning helpers", () => {
           task: exampleTaskRequest,
           activeLeaseCount: 0,
           runCount: 0,
-          subscription
+          subscription,
+          policy: enabledPolicy
         },
         exampleRunnerCapability,
         now
@@ -48,7 +67,8 @@ describe("lifecycle planning helpers", () => {
           task: exampleTaskRequest,
           activeLeaseCount: 1,
           runCount: 0,
-          subscription
+          subscription,
+          policy: enabledPolicy
         },
         exampleRunnerCapability,
         now
@@ -63,7 +83,8 @@ describe("lifecycle planning helpers", () => {
           task: exampleTaskRequest,
           activeLeaseCount: 0,
           runCount: exampleTaskRequest.maxRuns,
-          subscription
+          subscription,
+          policy: enabledPolicy
         },
         exampleRunnerCapability,
         now
@@ -85,6 +106,126 @@ describe("lifecycle planning helpers", () => {
           activeLeaseCount: 0,
           runCount: 0,
           subscription
+        },
+        {
+          ...exampleRunnerCapability,
+          supportsNetwork: true
+        },
+        now
+      )
+    ).toBe(false);
+  });
+
+  it("rejects leases when the volunteer policy is paused", () => {
+    expect(
+      canLeaseTask(
+        {
+          task: exampleTaskRequest,
+          activeLeaseCount: 0,
+          runCount: 0,
+          subscription,
+          policy: {
+            enabled: false,
+            projectAllowlist: [exampleTaskRequest.projectId],
+            taskTypeAllowlist: ["analysis", "triage", "docs_draft"],
+            capacity: {
+              maxUsedPercent: 80,
+              onlyIfResetsWithinMinutes: 180,
+              maxRunsPerDay: 3,
+              maxEstimatedSize: "small"
+            },
+            permissions: {
+              maxSandbox: "read-only",
+              allowNetwork: false,
+              allowPatches: false
+            }
+          }
+        },
+        exampleRunnerCapability,
+        now
+      )
+    ).toBe(false);
+  });
+
+  it("rejects leases when the volunteer has no saved policy", () => {
+    expect(
+      canLeaseTask(
+        {
+          task: exampleTaskRequest,
+          activeLeaseCount: 0,
+          runCount: 0,
+          subscription
+        },
+        exampleRunnerCapability,
+        now
+      )
+    ).toBe(false);
+  });
+
+  it("rejects leases outside the volunteer policy project allowlist", () => {
+    expect(
+      canLeaseTask(
+        {
+          task: exampleTaskRequest,
+          activeLeaseCount: 0,
+          runCount: 0,
+          subscription,
+          policy: {
+            enabled: true,
+            projectAllowlist: ["other/project"],
+            taskTypeAllowlist: ["analysis", "triage", "docs_draft"],
+            capacity: {
+              maxUsedPercent: 80,
+              onlyIfResetsWithinMinutes: 180,
+              maxRunsPerDay: 3,
+              maxEstimatedSize: "small"
+            },
+            permissions: {
+              maxSandbox: "read-only",
+              allowNetwork: false,
+              allowPatches: false
+            }
+          }
+        },
+        exampleRunnerCapability,
+        now
+      )
+    ).toBe(false);
+  });
+
+  it("rejects leases outside tightened volunteer policy permissions", () => {
+    expect(
+      canLeaseTask(
+        {
+          task: {
+            ...exampleTaskRequest,
+            permissions: {
+              ...exampleTaskRequest.permissions,
+              network: true
+            }
+          },
+          activeLeaseCount: 0,
+          runCount: 0,
+          subscription: {
+            ...subscription,
+            allowNetwork: true
+          },
+          policy: {
+            enabled: true,
+            projectAllowlist: [exampleTaskRequest.projectId],
+            taskTypeAllowlist: ["analysis", "triage", "docs_draft"],
+            capacity: {
+              maxUsedPercent: 80,
+              onlyIfResetsWithinMinutes: 180,
+              maxRunsPerDay: 3,
+              maxEstimatedSize: "small"
+            },
+            permissions: {
+              maxSandbox: "read-only",
+              allowNetwork: false,
+              allowPatches: false
+            }
+          }
         },
         {
           ...exampleRunnerCapability,

@@ -95,6 +95,7 @@ export default defineSchema({
   })
     .index("by_project_id", ["projectId"])
     .index("by_created_by", ["createdByUserId"])
+    .index("by_status", ["status"])
     .index("by_github_installation", ["githubInstallationId"]),
 
   githubInstallations: defineTable({
@@ -169,9 +170,55 @@ export default defineSchema({
     createdAt: v.string(),
     updatedAt: v.string()
   })
+    .index("by_volunteer", ["volunteerUserId"])
     .index("by_volunteer_project", ["volunteerUserId", "projectId"])
     .index("by_project_enabled", ["projectId", "enabled"])
     .index("by_volunteer_enabled", ["volunteerUserId", "enabled"]),
+
+  volunteerPolicies: defineTable({
+    volunteerUserId: v.string(),
+    enabled: v.boolean(),
+    projectAllowlist: v.array(v.string()),
+    taskTypeAllowlist: v.array(v.string()),
+    capacity: v.object({
+      maxUsedPercent: v.number(),
+      onlyIfResetsWithinMinutes: v.number(),
+      maxRunsPerDay: v.number(),
+      maxEstimatedSize: v.string()
+    }),
+    permissions: v.object({
+      maxSandbox: v.string(),
+      allowNetwork: v.boolean(),
+      allowPatches: v.boolean()
+    }),
+    review: v.object({
+      requireBeforeUpload: v.boolean(),
+      requireBeforePublicPosting: v.boolean()
+    }),
+    privacy: v.object({
+      identityVisibility: v.string(),
+      shareCodexVersion: v.boolean(),
+      shareRunnerPlatform: v.boolean()
+    }),
+    createdAt: v.string(),
+    updatedAt: v.string()
+  }).index("by_volunteer", ["volunteerUserId"]),
+
+  runnerSetupTokens: defineTable({
+    tokenId: v.string(),
+    volunteerUserId: v.string(),
+    tokenHash: v.string(),
+    label: v.optional(v.string()),
+    status: v.string(),
+    createdAt: v.string(),
+    expiresAt: v.optional(v.string()),
+    revokedAt: v.optional(v.string()),
+    lastUsedAt: v.optional(v.string())
+  })
+    .index("by_token_id", ["tokenId"])
+    .index("by_token_hash", ["tokenHash"])
+    .index("by_volunteer", ["volunteerUserId"])
+    .index("by_volunteer_status", ["volunteerUserId", "status"]),
 
   taskLeases: defineTable({
     leaseId: v.string(),

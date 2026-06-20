@@ -3,7 +3,8 @@ import type {
   RunnerCapability,
   RunnerCapabilityKey,
   TaskLease,
-  TaskRequest
+  TaskRequest,
+  VolunteerPolicy
 } from "@oss-capacity/core";
 
 export type LeaseCandidateTask = Pick<
@@ -12,6 +13,7 @@ export type LeaseCandidateTask = Pick<
   | "projectId"
   | "status"
   | "type"
+  | "expectedSize"
   | "permissions"
   | "requiredCapabilities"
   | "maxRuns"
@@ -29,6 +31,14 @@ export type LeaseCandidateState = {
     readonly allowNetwork: boolean;
     readonly allowPatches: boolean;
   };
+  readonly policy?: Pick<
+    VolunteerPolicy,
+    | "enabled"
+    | "projectAllowlist"
+    | "taskTypeAllowlist"
+    | "capacity"
+    | "permissions"
+  >;
 };
 
 export type StaleRunCleanupDecision =
@@ -50,6 +60,12 @@ const sandboxRank = {
   "read-only": 0,
   "workspace-write": 1,
   "danger-full-access": 2
+} as const;
+
+const taskSizeRank = {
+  small: 0,
+  medium: 1,
+  large: 2
 } as const;
 
 const terminalRunStatuses = new Set(["completed", "failed", "canceled", "expired"]);
@@ -122,6 +138,59 @@ function subscriptionAllowsTask(
   return !task.permissions.allowPatches || subscription.allowPatches;
 }
 
+function policyAllowsTask(
+  policy: LeaseCandidateState["policy"],
+  task: LeaseCandidateTask
+): boolean {
+  if (policy === undefined) {
+    return false;
+  }
+
+  if (!policy.enabled) {
+    return false;
+  }
+
+  if (!policy.projectAllowlist.includes(task.projectId)) {
+    return false;
+  }
+
+  if (!policy.taskTypeAllowlist.includes(task.type)) {
+    return false;
+  }
+
+  const maxTaskSizeRank =
+    taskSizeRank[policy.capacity.maxEstimatedSize as keyof typeof taskSizeRank];
+  const taskExpectedSizeRank =
+    taskSizeRank[task.expectedSize as keyof typeof taskSizeRank];
+
+  if (maxTaskSizeRank === undefined || taskExpectedSizeRank === undefined) {
+    return false;
+  }
+
+  if (taskExpectedSizeRank > maxTaskSizeRank) {
+    return false;
+  }
+
+  const maxSandboxRank =
+    sandboxRank[policy.permissions.maxSandbox as keyof typeof sandboxRank];
+  const taskSandboxRank =
+    sandboxRank[task.permissions.sandbox as keyof typeof sandboxRank];
+
+  if (maxSandboxRank === undefined || taskSandboxRank === undefined) {
+    return false;
+  }
+
+  if (taskSandboxRank > maxSandboxRank) {
+    return false;
+  }
+
+  if (task.permissions.network && !policy.permissions.allowNetwork) {
+    return false;
+  }
+
+  return !task.permissions.allowPatches || policy.permissions.allowPatches;
+}
+
 export function canLeaseTask(
   state: LeaseCandidateState,
   runner: Pick<
@@ -140,7 +209,8 @@ export function canLeaseTask(
     state.activeLeaseCount === 0 &&
     state.runCount < state.task.maxRuns &&
     supportsTask(runner, state.task) &&
-    subscriptionAllowsTask(state.subscription, state.task)
+    subscriptionAllowsTask(state.subscription, state.task) &&
+    policyAllowsTask(state.policy, state.task)
   );
 }
 
