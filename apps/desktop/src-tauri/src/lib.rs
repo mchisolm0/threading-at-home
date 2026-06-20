@@ -9,7 +9,7 @@ use std::{
     process::{Command, Stdio},
     sync::{Arc, Mutex},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::State;
 
@@ -18,6 +18,7 @@ const MIN_INTERVAL_SECONDS: u64 = 60;
 const MAX_LOG_FILES: usize = 12;
 const MAX_LOG_BYTES: usize = 48 * 1024;
 const MAX_PROCESS_OUTPUT_BYTES: usize = 96 * 1024;
+const MAX_COMMAND_RUNTIME: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -318,32 +319,99 @@ pub fn build_runner_command(action: &str) -> RunnerCommand {
 }
 
 fn split_command(command: &str) -> Vec<String> {
-    command
-        .split_whitespace()
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut in_part = false;
+
+    for character in command.chars() {
+        if escaped {
+            current.push(character);
+            escaped = false;
+            in_part = true;
+            continue;
+        }
+
+        if character == '\\' {
+            escaped = true;
+            in_part = true;
+            continue;
+        }
+
+        if let Some(quote_character) = quote {
+            if character == quote_character {
+                quote = None;
+            } else {
+                current.push(character);
+            }
+            in_part = true;
+            continue;
+        }
+
+        match character {
+            '\'' | '"' => {
+                quote = Some(character);
+                in_part = true;
+            }
+            character if character.is_whitespace() => {
+                if in_part {
+                    parts.push(std::mem::take(&mut current));
+                    in_part = false;
+                }
+            }
+            character => {
+                current.push(character);
+                in_part = true;
+            }
+        }
+    }
+
+    if escaped {
+        current.push('\\');
+    }
+
+    if in_part {
+        parts.push(current);
+    }
+
+    parts
 }
 
 fn command_preview(command: &RunnerCommand) -> String {
-    std::iter::once(command.program.as_str())
-        .chain(command.args.iter().map(String::as_str))
-        .map(redact_argument)
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut parts = vec![redact_argument(&command.program)];
+    let mut redact_next = false;
+
+    for argument in &command.args {
+        let sensitive = is_sensitive_argument(argument);
+
+        if redact_next || sensitive {
+            parts.push("[redacted]".to_string());
+        } else {
+            parts.push(redact_argument(argument));
+        }
+
+        redact_next = sensitive && !argument.contains('=');
+    }
+
+    parts.join(" ")
 }
 
 fn redact_argument(argument: &str) -> String {
-    if argument.contains("token")
-        || argument.contains("auth")
-        || argument.contains("secret")
-        || argument.contains("credential")
-    {
+    if is_sensitive_argument(argument) {
         "[redacted]".to_string()
     } else {
         argument.to_string()
     }
+}
+
+fn is_sensitive_argument(argument: &str) -> bool {
+    let argument = argument.to_ascii_lowercase();
+
+    argument.contains("token")
+        || argument.contains("auth")
+        || argument.contains("secret")
+        || argument.contains("credential")
 }
 
 #[derive(Debug)]
@@ -357,6 +425,7 @@ fn run_command_capture(
     command: &RunnerCommand,
     runtime: Option<Arc<Mutex<RunnerRuntime>>>,
 ) -> Result<ProcessOutput, String> {
+    let started = Instant::now();
     let mut process = Command::new(&command.program);
 
     process
@@ -385,6 +454,14 @@ fn run_command_capture(
     let mut termination_requested = false;
 
     loop {
+        if started.elapsed() > MAX_COMMAND_RUNTIME {
+            terminate_process_tree(child.id());
+            let _ = child.wait();
+            let _ = stdout_handle.join();
+            let _ = stderr_handle.join();
+            return Err("Local runner command timed out.".to_string());
+        }
+
         if runtime.as_ref().is_some_and(stop_requested) {
             if !termination_requested {
                 terminate_process_tree(child.id());
@@ -745,7 +822,22 @@ mod tests {
             command.args,
             vec!["--filter", "@oss-capacity/runner", "dev", "--", "run-once"]
         );
-        assert!(command.cwd.ends_with("threading-at-home"));
+        assert_eq!(command.cwd, repo_root());
+    }
+
+    #[test]
+    fn split_command_preserves_quoted_arguments() {
+        assert_eq!(
+            split_command(
+                r#""/Applications/OSS Capacity/runner" --flag "two words" escaped\ value"#
+            ),
+            vec![
+                "/Applications/OSS Capacity/runner",
+                "--flag",
+                "two words",
+                "escaped value"
+            ]
+        );
     }
 
     #[test]
@@ -755,14 +847,15 @@ mod tests {
             args: vec![
                 "login".to_string(),
                 "--setup-token".to_string(),
-                "setup-token-super-secret".to_string(),
+                "abc123".to_string(),
+                "--config-auth=inline-secret".to_string(),
             ],
             cwd: PathBuf::from("."),
         };
 
         assert_eq!(
             command_preview(&command),
-            "oss-capacity-runner login [redacted] [redacted]"
+            "oss-capacity-runner login [redacted] [redacted] [redacted]"
         );
     }
 

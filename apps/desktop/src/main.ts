@@ -235,6 +235,10 @@ function render(): void {
   `;
 }
 
+function fireAndForget(task: Promise<void>): void {
+  void task.catch(() => undefined);
+}
+
 appRoot.addEventListener("click", (event) => {
   const target = event.target;
 
@@ -245,15 +249,15 @@ appRoot.addEventListener("click", (event) => {
   const action = target.dataset.action;
 
   if (action === "refresh") {
-    void refresh();
+    fireAndForget(refresh());
   } else if (action === "diagnostics") {
-    void runDiagnostics();
+    fireAndForget(runDiagnostics());
   } else if (action === "start") {
-    void startRunner();
+    fireAndForget(startRunner());
   } else if (action === "stop") {
-    void stopRunner();
+    fireAndForget(stopRunner());
   }
 });
 
 render();
-void refresh();
+fireAndForget(refresh());
