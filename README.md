@@ -67,6 +67,9 @@ pnpm --filter @oss-capacity/desktop dev
 See [docs/desktop-wrapper.md](docs/desktop-wrapper.md) for runner setup,
 capacity display, local log handling, and current packaging limitations.
 
+For optional VM-backed command/test execution, see
+[docs/smolvm-isolation.md](docs/smolvm-isolation.md).
+
 For the first end-to-end read-only MVP path, follow
 [docs/first-read-only-task-loop-demo.md](docs/first-read-only-task-loop-demo.md).
 

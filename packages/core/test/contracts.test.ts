@@ -260,6 +260,116 @@ describe("shared domain contracts", () => {
     ).toEqual([]);
   });
 
+  it("allows explicit smolvm execution for patch and test tasks", () => {
+    expect(
+      validatePrivateBetaTaskRequest({
+        ...exampleTaskRequest,
+        type: "test_investigation",
+        prompt: "Investigate the existing failing test output and summarize likely causes.",
+        execution: {
+          isolation: "smolvm",
+          image: "node:22-alpine",
+          network: false,
+          commands: [
+            {
+              name: "unit tests",
+              argv: ["pnpm", "test"],
+              timeoutMs: 120_000
+            }
+          ],
+          artifacts: [
+            {
+              path: "reports/test.log",
+              kind: "log",
+              maxBytes: 50_000,
+              mediaType: "text/plain"
+            }
+          ],
+          maxOutputBytes: 128_000
+        },
+        requiredCapabilities: [
+          "codex.exec.json",
+          "codex.exec.output_schema",
+          "sandbox.read_only",
+          "network.disabled",
+          "smolvm.available",
+          "smolvm.workspace_snapshot",
+          "smolvm.command_bridge",
+          "artifact.extract"
+        ]
+      })
+    ).toEqual([]);
+  });
+
+  it("requires smolvm capabilities and explicit argv commands together", () => {
+    const missingCapabilities = validatePrivateBetaTaskRequest({
+      ...exampleTaskRequest,
+      type: "test_investigation",
+      execution: {
+        isolation: "smolvm",
+        image: "alpine",
+        network: false,
+        commands: [{ name: "shell", argv: ["sh", "-c", "npm test"] }]
+      },
+      requiredCapabilities: [
+        "codex.exec.json",
+        "codex.exec.output_schema",
+        "sandbox.read_only",
+        "network.disabled"
+      ]
+    });
+
+    expect(missingCapabilities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "missing_smolvm_capability" }),
+        expect.objectContaining({ code: "shell_command_not_allowed" })
+      ])
+    );
+
+    expect(
+      validatePrivateBetaTaskRequest({
+        ...exampleTaskRequest,
+        requiredCapabilities: [
+          "codex.exec.json",
+          "codex.exec.output_schema",
+          "sandbox.read_only",
+          "network.disabled",
+          "smolvm.available"
+        ]
+      })
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "smolvm_capability_without_execution" })
+      ])
+    );
+
+    expect(
+      validatePrivateBetaTaskRequest({
+        ...exampleTaskRequest,
+        type: "test_investigation",
+        execution: {
+          isolation: "smolvm",
+          image: "alpine",
+          network: true,
+          allowHosts: ["registry.npmjs.org"],
+          commands: [{ name: "tests", argv: ["pnpm", "test"] }]
+        },
+        requiredCapabilities: [
+          "codex.exec.json",
+          "codex.exec.output_schema",
+          "sandbox.read_only",
+          "smolvm.available",
+          "smolvm.workspace_snapshot",
+          "smolvm.command_bridge"
+        ]
+      })
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: "execution.network", code: "network_not_allowed" })
+      ])
+    );
+  });
+
   it("applies private beta task permission gates and size caps", () => {
     const result = validatePrivateBetaTaskRequest({
       ...exampleTaskRequest,

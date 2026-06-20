@@ -31,6 +31,12 @@ between `run-once` attempts and Stop requests cancellation of the current local
 runner command before ending the loop. This wraps the existing runner behavior;
 it does not invent new broker-side semantics.
 
+`diagnose` also reports optional smolvm availability when the runner supports
+isolated command/test execution. A missing smolvm install is reported as a
+capability diagnostic, not as a desktop credential or broker error. See
+[smolvm Runner Isolation](smolvm-isolation.md) for setup, fallback behavior, and
+limitations.
+
 ## Runner Configuration
 
 Use the same setup flow as the CLI:

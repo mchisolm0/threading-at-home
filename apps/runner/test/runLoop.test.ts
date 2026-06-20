@@ -6,7 +6,8 @@ import {
   exampleTaskLease,
   exampleTaskRequest,
   exampleVolunteerPolicy,
-  type ResultPackage
+  type ResultPackage,
+  type TaskRequest
 } from "@oss-capacity/core";
 import { describe, expect, it } from "vitest";
 
@@ -276,6 +277,288 @@ describe("runner run-once loop", () => {
     });
     expect(completeCall?.input.resultPackage.repositoryCommitSha).toBe(
       "0123456789abcdef0123456789abcdef01234567"
+    );
+  });
+
+  it("runs explicit smolvm execution after Codex and uploads bounded artifacts", async () => {
+    const calls: unknown[] = [];
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "oss-capacity-workspaces-"));
+    const logRoot = await mkdtemp(join(tmpdir(), "oss-capacity-logs-"));
+    const timestamps = [
+      new Date("2026-06-20T16:00:00.000Z"),
+      new Date("2026-06-20T16:00:01.000Z"),
+      new Date("2026-06-20T16:00:04.000Z"),
+      new Date("2026-06-20T16:00:09.000Z")
+    ];
+    let timestampIndex = 0;
+    const task = {
+      ...exampleTaskRequest,
+      type: "test_investigation",
+      execution: {
+        isolation: "smolvm",
+        image: "node:22-alpine",
+        network: false,
+        commands: [{ name: "unit tests", argv: ["pnpm", "test"] }],
+        artifacts: [{ path: "reports/test.log", kind: "log" }]
+      },
+      requiredCapabilities: [
+        "codex.exec.json",
+        "codex.exec.output_schema",
+        "sandbox.read_only",
+        "network.disabled",
+        "smolvm.available",
+        "smolvm.workspace_snapshot",
+        "smolvm.command_bridge",
+        "artifact.extract"
+      ]
+    } satisfies TaskRequest;
+
+    const result = await runOnce({
+      config,
+      broker: createBroker(calls, {
+        eligibleTask: async (input) => {
+          calls.push({ method: "eligibleTask", input });
+          return task;
+        },
+        leaseEligibleTask: async (input) => {
+          calls.push({ method: "leaseEligibleTask", input });
+
+          return {
+            task,
+            lease: {
+              ...exampleTaskLease,
+              leaseId: input.leaseId,
+              runId: input.runId,
+              runnerId: input.runnerId,
+              leasedAt: input.now,
+              expiresAt: input.expiresAt,
+              heartbeatAt: input.now,
+              taskSnapshotHash,
+              leaseTokenHash: input.leaseTokenHash
+            }
+          };
+        }
+      }),
+      workspaceRoot,
+      logRoot,
+      dependencies: {
+        now: () => timestamps[Math.min(timestampIndex++, timestamps.length - 1)] ?? now,
+        readCodexAccountState: async () => ({
+          codexCliVersion: "0.140.0",
+          authenticated: true,
+          authMode: "chatgpt"
+        }),
+        readCodexRateLimits: async () => ({
+          account: {
+            authenticated: true,
+            authMode: "chatgpt"
+          },
+          rateLimits: [{ usedPercent: 10 }]
+        }),
+        exec: async (_file, args) => {
+          if (args.includes("rev-parse")) {
+            return {
+              stdout: "0123456789abcdef0123456789abcdef01234567\n",
+              stderr: ""
+            };
+          }
+
+          return { stdout: "", stderr: "" };
+        },
+        runCodexExec: async (options) => {
+          expect(options.prompt).toContain("smolvm");
+          expect(options.prompt).toContain("Do not run shell commands yourself");
+
+          return {
+            codexCliVersion: "0.140.0",
+            finalMessage: "prepared",
+            structuredOutput: {
+              path: String(options.structuredOutputPath),
+              text: "{\"summary\":\"Prepared test investigation\"}",
+              json: { summary: "Prepared test investigation" }
+            },
+            events: [{ type: "turn.completed" }],
+            usage: { totalTokens: 3 },
+            logs: [],
+            exitCode: 0
+          };
+        },
+        runIsolatedTaskCommands: async (input) => {
+          expect(input.taskExecution.commands[0]?.argv).toEqual(["pnpm", "test"]);
+          expect(input.workspacePath).toContain("open-source__widgets");
+
+          return {
+            availability: {
+              ok: true,
+              status: "available",
+              command: "smolvm",
+              version: "1.2.3",
+              diagnostic: "smolvm 1.2.3"
+            },
+            snapshotPath: "/tmp/snapshot",
+            commandResults: [
+              {
+                name: "unit tests",
+                command: "pnpm test",
+                exitCode: 0,
+                durationMs: 50,
+                stdout: "ok",
+                stderr: "",
+                timedOut: false,
+                outputTruncated: false
+              }
+            ],
+            commandSummaries: [
+              {
+                command: "smolvm: pnpm test",
+                exitCode: 0,
+                durationMs: 50,
+                summary: "Isolated tests passed."
+              }
+            ],
+            artifacts: [
+              {
+                kind: "log",
+                storageKey: `results/${input.runId}/smolvm/reports/test.log`,
+                sha256: `sha256:${"e".repeat(64)}`,
+                byteLength: 12,
+                mediaType: "text/plain",
+                relativePath: "reports/test.log"
+              }
+            ],
+            warnings: ["Workspace snapshot skipped secret-shaped files."]
+          };
+        }
+      }
+    });
+    const completeCall = calls.find(
+      (call): call is { method: "completeRun"; input: { resultPackage: ResultPackage } } =>
+        typeof call === "object" &&
+        call !== null &&
+        "method" in call &&
+        call.method === "completeRun"
+    );
+
+    expect(result.status).toBe("completed");
+    expect(completeCall?.input.resultPackage.commandSummaries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ command: "smolvm: pnpm test" })
+      ])
+    );
+    expect(completeCall?.input.resultPackage.artifacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "log",
+          storageKey: expect.stringContaining("/smolvm/reports/test.log")
+        })
+      ])
+    );
+    expect(completeCall?.input.resultPackage.warnings).toContain(
+      "Workspace snapshot skipped secret-shaped files."
+    );
+    expect(completeCall?.input.resultPackage.completedAt).toBe(
+      "2026-06-20T16:00:09.000Z"
+    );
+    expect(completeCall?.input.resultPackage.commandSummaries[0]?.durationMs).toBe(3_000);
+  });
+
+  it("fails VM-required tasks safely when isolated execution is unavailable", async () => {
+    const calls: unknown[] = [];
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "oss-capacity-workspaces-"));
+    const logRoot = await mkdtemp(join(tmpdir(), "oss-capacity-logs-"));
+    const task = {
+      ...exampleTaskRequest,
+      type: "test_investigation",
+      execution: {
+        isolation: "smolvm",
+        image: "alpine",
+        network: false,
+        commands: [{ name: "tests", argv: ["pnpm", "test"] }]
+      },
+      requiredCapabilities: [
+        "codex.exec.json",
+        "codex.exec.output_schema",
+        "sandbox.read_only",
+        "network.disabled",
+        "smolvm.available",
+        "smolvm.workspace_snapshot",
+        "smolvm.command_bridge"
+      ]
+    } satisfies TaskRequest;
+
+    const result = await runOnce({
+      config,
+      broker: createBroker(calls, {
+        eligibleTask: async (input) => {
+          calls.push({ method: "eligibleTask", input });
+          return task;
+        },
+        leaseEligibleTask: async (input) => {
+          calls.push({ method: "leaseEligibleTask", input });
+
+          return {
+            task,
+            lease: {
+              ...exampleTaskLease,
+              leaseId: input.leaseId,
+              runId: input.runId,
+              runnerId: input.runnerId,
+              leasedAt: input.now,
+              expiresAt: input.expiresAt,
+              heartbeatAt: input.now,
+              taskSnapshotHash,
+              leaseTokenHash: input.leaseTokenHash
+            }
+          };
+        }
+      }),
+      workspaceRoot,
+      logRoot,
+      dependencies: {
+        now: () => now,
+        readCodexAccountState: async () => ({
+          codexCliVersion: "0.140.0",
+          authenticated: true,
+          authMode: "chatgpt"
+        }),
+        readCodexRateLimits: async () => ({
+          account: {
+            authenticated: true,
+            authMode: "chatgpt"
+          },
+          rateLimits: [{ usedPercent: 10 }]
+        }),
+        exec: async (_file, args) => {
+          if (args.includes("rev-parse")) {
+            return {
+              stdout: "0123456789abcdef0123456789abcdef01234567\n",
+              stderr: ""
+            };
+          }
+
+          return { stdout: "", stderr: "" };
+        },
+        runCodexExec: async () => ({
+          codexCliVersion: "0.140.0",
+          finalMessage: "prepared",
+          events: [{ type: "turn.completed" }],
+          usage: {},
+          logs: [],
+          exitCode: 0
+        }),
+        runIsolatedTaskCommands: async () => {
+          throw new Error("smolvm isolation required but missing: not installed");
+        }
+      }
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("smolvm isolation required");
+    expect(calls.some((call) => JSON.stringify(call).includes("completeRun"))).toBe(
+      false
+    );
+    expect(calls.some((call) => JSON.stringify(call).includes("failRun"))).toBe(
+      true
     );
   });
 

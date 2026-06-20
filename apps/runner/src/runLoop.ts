@@ -28,6 +28,10 @@ import type { RunnerConfig } from "./config.js";
 import { captureWorkspacePatch } from "./patchCapture.js";
 import { sanitizeError, sanitizeText } from "./sanitize.js";
 import {
+  runIsolatedTaskCommands,
+  type IsolatedExecutionResult
+} from "./smolvm.js";
+import {
   ensureCleanWorkspace,
   type WorkspaceExec,
   type WorkspaceCheckout,
@@ -42,6 +46,7 @@ export type RunLoopDependencies = WorkspaceDependencies & {
   readonly readCodexAccountState?: typeof readCodexAccountState;
   readonly readCodexRateLimits?: typeof readCodexRateLimits;
   readonly runCodexExec?: typeof runCodexExec;
+  readonly runIsolatedTaskCommands?: typeof runIsolatedTaskCommands;
 };
 
 export type CapacityDecision = {
@@ -201,7 +206,16 @@ export async function runOnce(input: {
         "shell_environment_policy.inherit": "none"
       }
     });
-    const completedAt = now().toISOString();
+    const codexCompletedAt = now().toISOString();
+    const isolatedExecution =
+      lease.task.execution === undefined
+        ? undefined
+        : await (dependencies.runIsolatedTaskCommands ?? runIsolatedTaskCommands)({
+            taskExecution: lease.task.execution,
+            workspacePath: workspace.path,
+            artifactRoot: join(input.logRoot, "artifacts"),
+            runId: lease.lease.runId
+          });
     const patchCapture =
       lease.task.permissions.allowPatches && sandbox === "workspace-write"
         ? await captureWorkspacePatch({
@@ -210,13 +224,16 @@ export async function runOnce(input: {
             exec: dependencies.exec ?? defaultWorkspaceExec
           })
         : undefined;
+    const completedAt = now().toISOString();
     const resultPackage = completedResultPackage({
       lease,
       codex,
       workspace,
+      isolatedExecution,
       patchArtifact: patchCapture?.artifact,
       patchWarnings: patchCapture?.warnings ?? [],
       startedAt: codexStartedAt,
+      codexCompletedAt,
       completedAt,
       identityVisibility: configuration.policy?.privacy.identityVisibility ?? "anonymous",
       shareCodexVersion: configuration.policy?.privacy.shareCodexVersion ?? false
@@ -243,6 +260,14 @@ export async function runOnce(input: {
         eventCount: codex.events.length,
         exitCode: codex.exitCode
       },
+      isolatedExecution:
+        isolatedExecution === undefined
+          ? undefined
+          : {
+              commandCount: isolatedExecution.commandResults.length,
+              artifactCount: isolatedExecution.artifacts.length,
+              warnings: isolatedExecution.warnings.length
+            },
       resultPackageId: resultPackage.resultPackageId
     });
 
@@ -402,9 +427,11 @@ function completedResultPackage(input: {
   readonly lease: RunnerLeaseView;
   readonly codex: CodexExecResult;
   readonly workspace: WorkspaceCheckout;
+  readonly isolatedExecution?: IsolatedExecutionResult;
   readonly patchArtifact?: ResultPackage["patchArtifact"];
   readonly patchWarnings: readonly string[];
   readonly startedAt: string;
+  readonly codexCompletedAt: string;
   readonly completedAt: string;
   readonly identityVisibility: ResultPackage["volunteerVisibility"];
   readonly shareCodexVersion: boolean;
@@ -433,27 +460,43 @@ function completedResultPackage(input: {
       {
         command: `codex exec --json --ephemeral --sandbox ${input.lease.task.permissions.sandbox}`,
         exitCode: input.codex.exitCode,
-        durationMs: Math.max(0, Date.parse(input.completedAt) - Date.parse(input.startedAt)),
+        durationMs: Math.max(0, Date.parse(input.codexCompletedAt) - Date.parse(input.startedAt)),
         summary: `Codex emitted ${input.codex.events.length} JSON event(s).`
-      }
+      },
+      ...(input.isolatedExecution?.commandSummaries ?? [])
     ],
-    artifacts:
-      input.patchArtifact === undefined
+    artifacts: [
+      ...(input.isolatedExecution?.artifacts.map((artifact) => ({
+        kind: artifact.kind,
+        storageKey: artifact.storageKey,
+        sha256: artifact.sha256,
+        byteLength: artifact.byteLength,
+        mediaType: artifact.mediaType
+      })) ?? []),
+      ...(input.patchArtifact === undefined
         ? []
         : [
             {
-              kind: "patch",
+              kind: "patch" as const,
               storageKey: `results/${input.lease.lease.runId}/patch.diff`,
               sha256: input.patchArtifact.sha256,
               byteLength: input.patchArtifact.byteLength,
               mediaType: "text/x-diff"
             }
-          ],
+          ])
+    ],
     patchArtifact: input.patchArtifact,
     warnings:
       input.codex.structuredOutput?.json !== undefined && structuredOutput === undefined
-        ? ["Structured output was not a JSON object and was omitted.", ...input.patchWarnings]
-        : [...input.patchWarnings]
+        ? [
+            "Structured output was not a JSON object and was omitted.",
+            ...(input.isolatedExecution?.warnings ?? []),
+            ...input.patchWarnings
+          ]
+        : [
+            ...(input.isolatedExecution?.warnings ?? []),
+            ...input.patchWarnings
+          ]
   }));
 }
 
@@ -517,6 +560,15 @@ function errorResult(error: unknown): ResultPackage["error"] {
 }
 
 function buildCodexPrompt(task: TaskRequest): string {
+  const executionReminder =
+    task.execution === undefined
+      ? []
+      : [
+          "",
+          "The runner will execute the approved command/test list separately inside smolvm.",
+          "Do not run shell commands yourself; prepare any needed workspace edits or analysis for the explicit isolated commands."
+        ];
+
   if (task.type === "patch_proposal" && task.permissions.allowPatches) {
     return [
       "You are running an OSS Capacity patch proposal task.",
@@ -528,6 +580,7 @@ function buildCodexPrompt(task: TaskRequest): string {
       task.description === undefined ? undefined : `Description: ${task.description}`,
       `Repository: ${task.repository.fullName}`,
       task.target.ref === undefined ? undefined : `Target ref: ${task.target.ref}`,
+      ...executionReminder,
       "",
       task.prompt
     ]
@@ -543,6 +596,7 @@ function buildCodexPrompt(task: TaskRequest): string {
     task.description === undefined ? undefined : `Description: ${task.description}`,
     `Repository: ${task.repository.fullName}`,
     task.target.ref === undefined ? undefined : `Target ref: ${task.target.ref}`,
+    ...executionReminder,
     "",
     task.prompt
   ]
