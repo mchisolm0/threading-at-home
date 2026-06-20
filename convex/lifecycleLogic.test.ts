@@ -43,6 +43,23 @@ const enabledPolicy = {
   }
 } satisfies LeaseCandidateState["policy"];
 
+const patchTask = {
+  ...exampleTaskRequest,
+  type: "patch_proposal",
+  permissions: {
+    sandbox: "workspace-write",
+    network: false,
+    allowPatches: true,
+    publicPosting: "maintainer_only"
+  },
+  requiredCapabilities: [
+    "codex.exec.json",
+    "sandbox.workspace_write",
+    "network.disabled",
+    "patch.capture"
+  ]
+} satisfies LeaseCandidateState["task"];
+
 describe("lifecycle planning helpers", () => {
   it("allows a subscribed runner to lease a compatible active task", () => {
     expect(
@@ -82,6 +99,62 @@ describe("lifecycle planning helpers", () => {
         now
       )
     ).toBe(true);
+  });
+
+  it("allows patch proposal leases only when runner, policy, and subscription opt in", () => {
+    expect(
+      canLeaseTask(
+        {
+          task: patchTask,
+          activeLeaseCount: 0,
+          runCount: 0,
+          subscription: {
+            ...subscription,
+            taskTypeAllowlist: ["patch_proposal"],
+            maxSandbox: "workspace-write",
+            allowPatches: true
+          },
+          policy: {
+            ...enabledPolicy,
+            taskTypeAllowlist: ["patch_proposal"],
+            permissions: {
+              ...enabledPolicy.permissions,
+              maxSandbox: "workspace-write",
+              allowPatches: true
+            }
+          }
+        },
+        exampleRunnerCapability,
+        now
+      )
+    ).toBe(true);
+
+    expect(
+      canLeaseTask(
+        {
+          task: patchTask,
+          activeLeaseCount: 0,
+          runCount: 0,
+          subscription: {
+            ...subscription,
+            taskTypeAllowlist: ["patch_proposal"],
+            maxSandbox: "workspace-write",
+            allowPatches: false
+          },
+          policy: {
+            ...enabledPolicy,
+            taskTypeAllowlist: ["patch_proposal"],
+            permissions: {
+              ...enabledPolicy.permissions,
+              maxSandbox: "workspace-write",
+              allowPatches: true
+            }
+          }
+        },
+        exampleRunnerCapability,
+        now
+      )
+    ).toBe(false);
   });
 
   it("rejects a task that already has an active unexpired lease", () => {

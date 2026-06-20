@@ -54,6 +54,26 @@ const resultArtifact = v.object({
   mediaType: v.optional(v.string())
 });
 
+const patchChangedFile = v.object({
+  path: v.string(),
+  oldPath: v.optional(v.string()),
+  status: v.string(),
+  additions: v.optional(v.number()),
+  deletions: v.optional(v.number())
+});
+
+const patchArtifact = v.object({
+  kind: v.string(),
+  baseCommitSha: v.optional(v.string()),
+  sha256: v.string(),
+  byteLength: v.number(),
+  truncated: v.boolean(),
+  fileCount: v.number(),
+  changedFiles: v.array(patchChangedFile),
+  diff: v.string(),
+  approvalStatus: v.string()
+});
+
 const resultError = v.object({
   code: v.string(),
   message: v.string(),
@@ -288,6 +308,7 @@ export default defineSchema({
     structuredOutput: v.optional(jsonValue),
     commandSummaries: v.array(resultCommandSummary),
     artifacts: v.array(resultArtifact),
+    patchArtifact: v.optional(patchArtifact),
     warnings: v.array(v.string()),
     error: v.optional(resultError),
     resultVisibility: v.string(),
@@ -322,6 +343,22 @@ export default defineSchema({
     postedAt: v.optional(v.string())
   })
     .index("by_promotion_id", ["promotionId"])
+    .index("by_result_package", ["resultPackageId"])
+    .index("by_project", ["projectId"])
+    .index("by_actor", ["actorUserId"]),
+
+  patchApprovals: defineTable({
+    approvalId: v.string(),
+    resultPackageId: v.string(),
+    projectId: v.string(),
+    taskRequestId: v.string(),
+    runId: v.string(),
+    actorUserId: v.string(),
+    decision: v.string(),
+    note: v.optional(v.string()),
+    createdAt: v.string()
+  })
+    .index("by_approval_id", ["approvalId"])
     .index("by_result_package", ["resultPackageId"])
     .index("by_project", ["projectId"])
     .index("by_actor", ["actorUserId"]),

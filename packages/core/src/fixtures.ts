@@ -117,7 +117,13 @@ export const exampleRunnerCapability = {
   supportedSandboxModes: ["read-only", "workspace-write"],
   supportsNetwork: false,
   supportsPatchCapture: true,
-  supportedTaskTypes: ["analysis", "triage", "docs_draft", "test_investigation"],
+  supportedTaskTypes: [
+    "analysis",
+    "triage",
+    "patch_proposal",
+    "docs_draft",
+    "test_investigation"
+  ],
   supportedCapabilities: [
     "codex.exec.json",
     "codex.exec.output_schema",

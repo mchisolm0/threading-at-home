@@ -149,4 +149,33 @@ describe("maintainer task form builder", () => {
       ])
     );
   });
+
+  it("builds a gated patch proposal task request", () => {
+    const form = {
+      ...initialTaskForm(project.projectId),
+      title: "Fix widget test",
+      type: "patch_proposal" as const,
+      sandbox: "workspace-write" as const,
+      allowPatches: true,
+      prompt: "Edit the widget test fixture and propose the minimal diff for maintainer review."
+    };
+    const result = buildTaskRequest({
+      form,
+      viewer,
+      projects: [project],
+      now: new Date("2026-06-18T12:00:00Z"),
+      id: "task-patch"
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.success ? result.task.permissions : undefined).toMatchObject({
+      sandbox: "workspace-write",
+      allowPatches: true,
+      network: false,
+      publicPosting: "maintainer_only"
+    });
+    expect(result.success ? result.task.requiredCapabilities : []).toEqual(
+      expect.arrayContaining(["sandbox.workspace_write", "patch.capture"])
+    );
+  });
 });

@@ -92,6 +92,16 @@ export const resultPackageRunStatuses = [
   "canceled",
   "expired"
 ] as const;
+export const patchApprovalStatuses = ["pending", "approved", "rejected"] as const;
+export const patchFileStatuses = [
+  "added",
+  "modified",
+  "deleted",
+  "renamed",
+  "copied",
+  "type_changed",
+  "unknown"
+] as const;
 
 const utcDateTimePattern =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
@@ -376,6 +386,8 @@ export const runnerArchitectureSchema = z.enum(runnerArchitectures);
 export const codexAuthModeSchema = z.enum(codexAuthModes);
 export const runnerCapabilityKeySchema = z.enum(runnerCapabilityKeys);
 export const resultPackageRunStatusSchema = z.enum(resultPackageRunStatuses);
+export const patchApprovalStatusSchema = z.enum(patchApprovalStatuses);
+export const patchFileStatusSchema = z.enum(patchFileStatuses);
 
 export const gitRepositorySchema = z
   .object({
@@ -632,6 +644,30 @@ export const resultCommandSummarySchema = z
   })
   .strict();
 
+export const patchChangedFileSchema = z
+  .object({
+    path: z.string().min(1).max(500),
+    oldPath: z.string().min(1).max(500).optional(),
+    status: patchFileStatusSchema,
+    additions: z.number().int().min(0).optional(),
+    deletions: z.number().int().min(0).optional()
+  })
+  .strict();
+
+export const patchArtifactSchema = z
+  .object({
+    kind: z.literal("unified_diff"),
+    baseCommitSha: gitCommitShaSchema.optional(),
+    sha256: contentHashSchema,
+    byteLength: z.number().int().min(0).max(1_000_000),
+    truncated: z.boolean(),
+    fileCount: z.number().int().min(0).max(1_000),
+    changedFiles: z.array(patchChangedFileSchema).max(200),
+    diff: z.string().max(120_000),
+    approvalStatus: patchApprovalStatusSchema
+  })
+  .strict();
+
 export const resultErrorSchema = z
   .object({
     code: z.string().min(1).max(120),
@@ -662,6 +698,7 @@ export const resultPackageSchema = z
     structuredOutput: jsonObjectSchema.optional(),
     commandSummaries: z.array(resultCommandSummarySchema).max(100),
     artifacts: z.array(resultArtifactSchema).max(100),
+    patchArtifact: patchArtifactSchema.optional(),
     warnings: z.array(z.string().min(1).max(2_000)).max(100),
     error: resultErrorSchema.optional(),
     resultVisibility: resultVisibilityModeSchema,
@@ -681,7 +718,8 @@ export const resultPackageSchema = z
       Boolean(result.summary) ||
       Boolean(result.structuredOutput) ||
       result.commandSummaries.length > 0 ||
-      result.artifacts.length > 0;
+      result.artifacts.length > 0 ||
+      result.patchArtifact !== undefined;
 
     if (result.runStatus === "completed" && !hasCompletedOutput) {
       context.addIssue({
@@ -717,10 +755,14 @@ export type ResultVisibilityMode = z.infer<typeof resultVisibilityModeSchema>;
 export type IdentityVisibilityMode = z.infer<typeof identityVisibilityModeSchema>;
 export type RunnerCapabilityKey = z.infer<typeof runnerCapabilityKeySchema>;
 export type ResultPackageRunStatus = z.infer<typeof resultPackageRunStatusSchema>;
+export type PatchApprovalStatus = z.infer<typeof patchApprovalStatusSchema>;
+export type PatchFileStatus = z.infer<typeof patchFileStatusSchema>;
 export type TaskRequest = z.infer<typeof taskRequestSchema>;
 export type VolunteerPolicy = z.infer<typeof volunteerPolicySchema>;
 export type RunnerCapability = z.infer<typeof runnerCapabilitySchema>;
 export type TaskLease = z.infer<typeof taskLeaseSchema>;
+export type PatchChangedFile = z.infer<typeof patchChangedFileSchema>;
+export type PatchArtifact = z.infer<typeof patchArtifactSchema>;
 export type ResultPackage = z.infer<typeof resultPackageSchema>;
 
 export type ValidationIssue = {

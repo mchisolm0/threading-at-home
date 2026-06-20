@@ -186,11 +186,24 @@ export type MaintainerResultListView = {
   };
 };
 
+export type PatchApprovalView = {
+  readonly approvalId: string;
+  readonly resultPackageId: string;
+  readonly projectId: string;
+  readonly taskRequestId: string;
+  readonly runId: string;
+  readonly actorUserId: string;
+  readonly decision: string;
+  readonly note?: string;
+  readonly createdAt: string;
+};
+
 export type MaintainerResultDetailView = {
   readonly resultPackage: MaintainerResultPackage;
   readonly run: RunView | null;
   readonly task: TaskRequest;
   readonly project: MaintainerResultListView["project"];
+  readonly patchApprovals: readonly PatchApprovalView[];
 };
 
 export type AuditEventView = {
@@ -295,7 +308,17 @@ export const convexApi = {
       "mutation",
       { taskRequestId: string; now: string },
       TaskRequest
-    >("lifecycle:archiveTask")
+    >("lifecycle:archiveTask"),
+    recordPatchApproval: makeFunctionReference<
+      "mutation",
+      {
+        resultPackageId: string;
+        decision: "approved" | "rejected";
+        note?: string;
+        now: string;
+      },
+      PatchApprovalView
+    >("lifecycle:recordPatchApproval")
   },
   volunteer: {
     dashboard: makeFunctionReference<

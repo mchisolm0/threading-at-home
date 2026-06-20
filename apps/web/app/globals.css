@@ -715,7 +715,8 @@ li {
 
 .command-list,
 .artifact-list,
-.warning-list {
+.warning-list,
+.patch-file-list {
   display: grid;
   gap: 12px;
   margin-top: 14px;
@@ -723,7 +724,8 @@ li {
 
 .command-list li,
 .artifact-list li,
-.warning-list li {
+.warning-list li,
+.patch-file-list li {
   display: grid;
   gap: 5px;
   border-top: 1px solid #edf0f2;
@@ -748,6 +750,71 @@ li {
   color: #30363d;
   font-size: 0.78rem;
   overflow-wrap: anywhere;
+}
+
+.patch-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.patch-metadata {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.patch-file-list li {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.patch-file-list strong {
+  overflow-wrap: anywhere;
+}
+
+.patch-file-list small {
+  color: #53616d;
+  font-size: 0.82rem;
+}
+
+.diff-block {
+  max-height: 640px;
+  border: 1px solid #c8d0d7;
+  border-radius: 6px;
+  background: #fbfcfd;
+  color: #24292f;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  overflow: auto;
+  padding: 0;
+  white-space: pre;
+}
+
+.diff-line {
+  display: block;
+  min-width: fit-content;
+  padding: 0 12px;
+}
+
+.diff-addition {
+  background: #e6f6e9;
+  color: #116138;
+}
+
+.diff-deletion {
+  background: #fde8e5;
+  color: #8a321f;
+}
+
+.diff-hunk {
+  background: #e8f1fb;
+  color: #1457a8;
+  font-weight: 750;
+}
+
+.diff-metadata {
+  background: #eef1f4;
+  color: #53616d;
+  font-weight: 750;
 }
 
 .warning-list li {

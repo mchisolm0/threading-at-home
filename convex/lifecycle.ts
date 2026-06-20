@@ -92,6 +92,18 @@ type MaintainerResultDetail = {
   readonly run: MaintainerRunView | null;
   readonly task: TaskRequest;
   readonly project: MaintainerResultProjectView;
+  readonly patchApprovals: readonly PatchApprovalView[];
+};
+type PatchApprovalView = {
+  readonly approvalId: string;
+  readonly resultPackageId: string;
+  readonly projectId: string;
+  readonly taskRequestId: string;
+  readonly runId: string;
+  readonly actorUserId: string;
+  readonly decision: string;
+  readonly note?: string;
+  readonly createdAt: string;
 };
 type AuditEventView = {
   readonly eventType: string;
@@ -403,6 +415,20 @@ function auditEventView(event: StoredDoc, actorUserId: string): AuditEventView {
   };
 }
 
+function patchApprovalView(approval: StoredDoc): PatchApprovalView {
+  return {
+    approvalId: String(approval.approvalId),
+    resultPackageId: String(approval.resultPackageId),
+    projectId: String(approval.projectId),
+    taskRequestId: String(approval.taskRequestId),
+    runId: String(approval.runId),
+    actorUserId: String(approval.actorUserId),
+    decision: String(approval.decision),
+    note: typeof approval.note === "string" ? approval.note : undefined,
+    createdAt: String(approval.createdAt)
+  };
+}
+
 function taskSummaryView(task: TaskRequest): MaintainerResultTaskSummary {
   return {
     id: task.id,
@@ -516,7 +542,16 @@ async function maintainerResultItem(
       projectId: String(projectDoc.projectId),
       repository: repositoryView(projectDoc.repository),
       status: String(projectDoc.status)
-    }
+    },
+    patchApprovals: (await collectByIndex<StoredDoc>(
+      ctx,
+      "patchApprovals",
+      "by_result_package",
+      "resultPackageId",
+      resultPackage.resultPackageId
+    ))
+      .sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)))
+      .map(patchApprovalView)
   };
 }
 
@@ -1038,6 +1073,82 @@ export const resultDetail = query({
     }
 
     return await maintainerResultItem(ctx, resultDoc, actor.userId);
+  }
+});
+
+export const recordPatchApproval = mutation({
+  args: {
+    resultPackageId: v.string(),
+    decision: v.union(v.literal("approved"), v.literal("rejected")),
+    note: v.optional(v.string()),
+    now: v.string()
+  },
+  handler: async (ctx, args): Promise<PatchApprovalView> => {
+    const actor = await requireAuthenticatedUser(ctx);
+    const now = requireIsoNow(args.now);
+    const resultDoc = await uniqueByIndex<StoredDoc>(
+      ctx,
+      "resultPackages",
+      "by_result_package_id",
+      "resultPackageId",
+      args.resultPackageId
+    );
+
+    if (resultDoc === null) {
+      throw new Error(`Result package not found: ${args.resultPackageId}`);
+    }
+
+    const detail = await maintainerResultItem(ctx, resultDoc, actor.userId);
+
+    if (detail === null) {
+      throw new Error("Only the verified project maintainer can review this patch");
+    }
+
+    if (detail.resultPackage.patchArtifact === undefined) {
+      throw new Error("Result package does not include a patch artifact");
+    }
+
+    const approval = {
+      approvalId: `${args.resultPackageId}:${Date.now()}:${Math.random()
+        .toString(36)
+        .slice(2, 10)}`,
+      resultPackageId: detail.resultPackage.resultPackageId,
+      projectId: detail.resultPackage.projectId,
+      taskRequestId: detail.resultPackage.taskRequestId,
+      runId: detail.resultPackage.runId,
+      actorUserId: actor.userId,
+      decision: args.decision,
+      note:
+        args.note === undefined || args.note.trim().length === 0
+          ? undefined
+          : args.note.trim().slice(0, 2_000),
+      createdAt: now
+    };
+
+    await ctx.db.insert("patchApprovals", toConvexDocument(approval));
+    await ctx.db.patch(resultDoc._id, {
+      patchArtifact: {
+        ...detail.resultPackage.patchArtifact,
+        approvalStatus: args.decision
+      }
+    });
+    await insertAuditEvent(ctx, {
+      eventType: `patch_proposal.${args.decision}`,
+      entityType: "resultPackage",
+      entityId: detail.resultPackage.resultPackageId,
+      projectId: detail.resultPackage.projectId,
+      taskRequestId: detail.resultPackage.taskRequestId,
+      runId: detail.resultPackage.runId,
+      actorUserId: actor.userId,
+      occurredAt: now,
+      metadata: {
+        approvalId: approval.approvalId,
+        patchSha256: detail.resultPackage.patchArtifact.sha256,
+        baseCommitSha: detail.resultPackage.patchArtifact.baseCommitSha
+      }
+    });
+
+    return patchApprovalView(approval as unknown as StoredDoc);
   }
 });
 
