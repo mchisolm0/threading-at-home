@@ -1,5 +1,9 @@
 import { makeFunctionReference } from "convex/server";
-import type { TaskRequest, VolunteerPolicy } from "@oss-capacity/core";
+import type {
+  ResultPackage,
+  TaskRequest,
+  VolunteerPolicy
+} from "@oss-capacity/core";
 
 export type Viewer = {
   readonly userId: string;
@@ -88,6 +92,75 @@ export type VolunteerDashboard = {
   readonly runnerTokens: readonly RunnerSetupTokenView[];
 };
 
+export type RunView = {
+  readonly runId: string;
+  readonly taskRequestId: string;
+  readonly projectId: string;
+  readonly leaseId?: string;
+  readonly runnerId?: string;
+  readonly status: string;
+  readonly attempt: number;
+  readonly taskSnapshotHash?: string;
+  readonly startedAt?: string;
+  readonly completedAt?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+};
+
+export type MaintainerResultPackage = Omit<
+  ResultPackage,
+  "runnerId" | "volunteerUserId"
+> & {
+  readonly runnerId?: string;
+};
+
+export type MaintainerResultListPackage = Pick<
+  MaintainerResultPackage,
+  | "resultPackageId"
+  | "runId"
+  | "taskRequestId"
+  | "projectId"
+  | "runnerId"
+  | "runStatus"
+  | "startedAt"
+  | "completedAt"
+  | "summary"
+  | "volunteerVisibility"
+> & {
+  readonly commandCount: number;
+  readonly commandDurationMs: number;
+  readonly artifactCount: number;
+  readonly warningCount: number;
+};
+
+export type MaintainerResultTaskSummary = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly status: string;
+  readonly title: string;
+  readonly type: string;
+  readonly priority: string;
+  readonly updatedAt: string;
+};
+
+export type MaintainerResultListView = {
+  readonly resultPackage: MaintainerResultListPackage;
+  readonly run: RunView | null;
+  readonly task: MaintainerResultTaskSummary;
+  readonly project: {
+    readonly projectId: string;
+    readonly repository: ProjectView["repository"];
+    readonly status: string;
+  };
+};
+
+export type MaintainerResultDetailView = {
+  readonly resultPackage: MaintainerResultPackage;
+  readonly run: RunView | null;
+  readonly task: TaskRequest;
+  readonly project: MaintainerResultListView["project"];
+};
+
 export const convexApi = {
   users: {
     viewer: makeFunctionReference<"query", Record<string, never>, Viewer | null>(
@@ -127,6 +200,16 @@ export const convexApi = {
       { taskRequestId: string },
       TaskRequest | null
     >("lifecycle:taskDetail"),
+    maintainerResults: makeFunctionReference<
+      "query",
+      { projectId?: string; limit?: number },
+      MaintainerResultListView[]
+    >("lifecycle:maintainerResults"),
+    resultDetail: makeFunctionReference<
+      "query",
+      { resultPackageId: string },
+      MaintainerResultDetailView | null
+    >("lifecycle:resultDetail"),
     createTask: makeFunctionReference<
       "mutation",
       { task: TaskRequest },

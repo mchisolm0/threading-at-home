@@ -30,6 +30,9 @@ import {
   type VolunteerPolicyFormState,
   type VolunteerPolicyIssue
 } from "./volunteerPolicy";
+import {
+  formatDurationMs
+} from "./results/resultView";
 
 type SaveIntent = "draft" | "active";
 
@@ -180,6 +183,7 @@ async function sha256Hex(value: string): Promise<string> {
 export function DashboardClient() {
   const viewer = useQuery(convexApi.users.viewer);
   const hasViewer = viewer !== undefined && viewer !== null;
+  const [projectFilter, setProjectFilter] = useState("all");
   const projects = useQuery(
     convexApi.github.myProjects,
     hasViewer ? {} : "skip"
@@ -189,6 +193,15 @@ export function DashboardClient() {
     hasViewer ? {} : "skip"
   );
   const tasks = useQuery(convexApi.lifecycle.myTasks, hasViewer ? {} : "skip");
+  const results = useQuery(
+    convexApi.lifecycle.maintainerResults,
+    hasViewer
+      ? {
+          limit: 50,
+          ...(projectFilter === "all" ? {} : { projectId: projectFilter })
+        }
+      : "skip"
+  );
   const volunteerDashboard = useQuery(
     convexApi.volunteer.dashboard,
     hasViewer ? {} : "skip"
@@ -212,7 +225,6 @@ export function DashboardClient() {
   const [taskForm, setTaskForm] = useState<TaskFormState>(initialTaskForm());
   const [isSavingTask, setIsSavingTask] = useState<SaveIntent | null>(null);
   const [pendingTaskId, setPendingTaskId] = useState<string | null>(null);
-  const [projectFilter, setProjectFilter] = useState("all");
   const [volunteerForm, setVolunteerForm] =
     useState<VolunteerPolicyFormState | null>(null);
   const [isSavingVolunteerPolicy, setIsSavingVolunteerPolicy] = useState(false);
@@ -263,6 +275,11 @@ export function DashboardClient() {
   const filteredTasks =
     tasks?.filter(
       (task) => projectFilter === "all" || task.projectId === projectFilter
+    ) ?? [];
+  const filteredResults =
+    results?.filter(
+      (result) =>
+        projectFilter === "all" || result.resultPackage.projectId === projectFilter
     ) ?? [];
   const volunteerPolicyPreview =
     volunteerForm === null ||
@@ -505,6 +522,7 @@ export function DashboardClient() {
     projects === undefined ||
     installations === undefined ||
     tasks === undefined ||
+    results === undefined ||
     volunteerDashboard === undefined ||
     volunteerForm === null
   ) {
@@ -550,6 +568,10 @@ export function DashboardClient() {
         <div>
           <span>Active tasks</span>
           <strong>{tasks.filter((task) => task.status === "active").length}</strong>
+        </div>
+        <div>
+          <span>Results</span>
+          <strong>{results.length}</strong>
         </div>
         <div>
           <span>Archived tasks</span>
@@ -966,6 +988,90 @@ export function DashboardClient() {
             <TaskPreview task={previewTask} />
           </div>
         </div>
+      </div>
+
+      <div className="panel results-panel">
+        <div className="panel-heading inline">
+          <div>
+            <p className="eyebrow">Inbox</p>
+            <h2>Task results</h2>
+          </div>
+          <label className="filter-control" htmlFor="resultProjectFilter">
+            Project
+            <select
+              id="resultProjectFilter"
+              value={projectFilter}
+              onChange={(event) => setProjectFilter(event.target.value)}
+            >
+              <option value="all">All</option>
+              {projects.map((project) => (
+                <option key={project.projectId} value={project.projectId}>
+                  {project.repository.fullName}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        {filteredResults.length === 0 ? (
+          <span className="empty-state">No task results.</span>
+        ) : (
+          <div className="result-table">
+            <div className="result-table-head">
+              <span>Result</span>
+              <span>Project</span>
+              <span>Status</span>
+              <span>Run</span>
+              <span>Completed</span>
+              <span>Actions</span>
+            </div>
+            {filteredResults.map(({ resultPackage, run, task }) => (
+              <div className="result-row" key={resultPackage.resultPackageId}>
+                <div>
+                  <Link
+                    href={`/dashboard/results/${encodeURIComponent(
+                      resultPackage.resultPackageId
+                    )}`}
+                  >
+                    {task.title}
+                  </Link>
+                  <small>{resultPackage.summary ?? resultPackage.resultPackageId}</small>
+                </div>
+                <span>{resultPackage.projectId}</span>
+                <StatusBadge status={resultPackage.runStatus} />
+                <span>
+                  Attempt {run?.attempt ?? "unknown"} ·{" "}
+                  {formatDurationMs(resultPackage.startedAt, resultPackage.completedAt)}
+                  {resultPackage.commandCount === 0
+                    ? ""
+                    : ` · commands ${formatDurationMs(
+                        resultPackage.startedAt,
+                        new Date(
+                          Date.parse(resultPackage.startedAt) +
+                            resultPackage.commandDurationMs
+                        ).toISOString()
+                      )}`}
+                </span>
+                <time dateTime={resultPackage.completedAt}>
+                  {resultPackage.completedAt}
+                </time>
+                <div className="row-actions">
+                  <button type="button" disabled title="Result archive is not wired yet">
+                    Archive
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled
+                    title="Rerun execution is planned for a later task"
+                  >
+                    Rerun
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="panel tasks-panel">

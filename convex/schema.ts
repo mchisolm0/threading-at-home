@@ -293,7 +293,8 @@ export default defineSchema({
     .index("by_result_package_id", ["resultPackageId"])
     .index("by_run_id", ["runId"])
     .index("by_task", ["taskRequestId"])
-    .index("by_project", ["projectId"]),
+    .index("by_project", ["projectId"])
+    .index("by_project_completed_at", ["projectId", "completedAt"]),
 
   auditEvents: defineTable({
     eventType: v.string(),
