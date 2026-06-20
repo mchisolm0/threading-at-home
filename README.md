@@ -6,6 +6,7 @@ OSS Capacity lets open source maintainers request Codex-powered work while volun
 
 - `apps/web`: Next.js app shell for maintainer and volunteer workflows.
 - `apps/runner`: Local volunteer runner CLI shell.
+- `apps/desktop`: Tauri shell around the local volunteer runner.
 - `convex`: Convex broker functions placeholder.
 - `packages/core`: Shared TypeScript contracts and policy helpers.
 - `packages/codex`: Local Codex integration package placeholder.
@@ -56,6 +57,15 @@ Run the runner placeholder:
 ```sh
 pnpm --filter @oss-capacity/runner dev
 ```
+
+Run the local desktop wrapper:
+
+```sh
+pnpm --filter @oss-capacity/desktop dev
+```
+
+See [docs/desktop-wrapper.md](docs/desktop-wrapper.md) for runner setup,
+capacity display, local log handling, and current packaging limitations.
 
 For the first end-to-end read-only MVP path, follow
 [docs/first-read-only-task-loop-demo.md](docs/first-read-only-task-loop-demo.md).
