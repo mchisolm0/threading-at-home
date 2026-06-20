@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  assertRunnerAuthTokenHashMatches,
   assertRunnerSetupTokenCanBeExchanged,
+  normalizeRunnerAuthTokenHash,
   normalizeRunnerSetupTokenHash
 } from "./volunteerLogic.js";
 
@@ -11,6 +13,25 @@ const validHash = `sha256:${"A".repeat(64)}`;
 describe("volunteer runner setup token helpers", () => {
   it("normalizes valid setup token hashes", () => {
     expect(normalizeRunnerSetupTokenHash(validHash)).toBe(validHash.toLowerCase());
+  });
+
+  it("normalizes and checks local runner auth token hashes", () => {
+    expect(normalizeRunnerAuthTokenHash(validHash)).toBe(validHash.toLowerCase());
+    expect(() =>
+      assertRunnerAuthTokenHashMatches(validHash.toLowerCase(), validHash)
+    ).not.toThrow();
+  });
+
+  it("rejects missing or mismatched runner auth token hashes", () => {
+    expect(() => normalizeRunnerAuthTokenHash("not-a-hash")).toThrow(
+      "Runner auth token hash must be a sha256 hex digest"
+    );
+    expect(() => assertRunnerAuthTokenHashMatches(undefined, validHash)).toThrow(
+      "Runner is missing local auth material"
+    );
+    expect(() =>
+      assertRunnerAuthTokenHashMatches(`sha256:${"b".repeat(64)}`, validHash)
+    ).toThrow("Runner auth token does not match");
   });
 
   it("rejects malformed setup token hashes", () => {

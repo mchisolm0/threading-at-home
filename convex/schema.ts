@@ -153,6 +153,7 @@ export default defineSchema({
     supportedTaskTypes: v.array(v.string()),
     supportedCapabilities: v.array(v.string()),
     maxOutputBytes: v.number(),
+    runnerAuthTokenHash: v.optional(v.string()),
     registeredAt: v.string(),
     lastSeenAt: v.string()
   })

@@ -14,7 +14,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@oss-capacity/core": "workspace:*"
+    "@oss-capacity/codex": "workspace:*",
+    "@oss-capacity/core": "workspace:*",
+    "convex": "^1.41.0"
   },
   "devDependencies": {
     "tsx": "^4.20.3"

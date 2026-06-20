@@ -270,6 +270,7 @@ export const convexApi = {
       "mutation",
       {
         tokenHash: string;
+        runnerAuthTokenHash: string;
         runner: unknown;
         now: string;
       },
