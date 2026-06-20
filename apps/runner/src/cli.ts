@@ -19,6 +19,10 @@ import {
 } from "./config.js";
 import { defaultRunnerStatePath, runOnce } from "./runLoop.js";
 import { redactDiagnosticValue, sanitizeError } from "./sanitize.js";
+import {
+  checkSmolvmAvailability,
+  type SmolvmAvailability
+} from "./smolvm.js";
 import { createLocalRunnerAuthHash, hashToken } from "./token.js";
 import type { WorkspaceDependencies } from "./workspace.js";
 
@@ -38,6 +42,7 @@ export type CliDependencies = {
   readonly readCodexAccountState?: typeof readCodexAccountState;
   readonly readCodexRateLimits?: typeof readCodexRateLimits;
   readonly runCodexExec?: typeof runCodexExec;
+  readonly checkSmolvmAvailability?: typeof checkSmolvmAvailability;
   readonly createRunnerId?: typeof createRunnerId;
   readonly createLocalRunnerAuthHash?: typeof createLocalRunnerAuthHash;
 } & WorkspaceDependencies;
@@ -162,6 +167,7 @@ async function login(
     "max-output-bytes"
   );
   const timestamp = now().toISOString();
+  const smolvmAvailability = await readOptionalSmolvmAvailability(dependencies);
   const config: RunnerConfig = {
     schemaVersion: runnerConfigSchemaVersion,
     brokerUrl,
@@ -178,6 +184,7 @@ async function login(
   const runner = buildRunnerCapability({
     config,
     codexAccount,
+    smolvmAvailability,
     now: timestamp
   });
   const broker = createClient(config.brokerUrl, dependencies);
@@ -205,7 +212,8 @@ async function login(
         updatedAt: timestamp
       })
     },
-    codex: codexAccountToDiagnostic(codexAccount)
+    codex: codexAccountToDiagnostic(codexAccount),
+    smolvm: smolvmAvailabilityToDiagnostic(smolvmAvailability)
   });
 }
 
@@ -219,9 +227,11 @@ async function heartbeat(
   const config = await (dependencies.readConfig ?? readRunnerConfig)(configPath);
   const timestamp = now().toISOString();
   const codexAccount = await readOptionalCodexAccount(config, dependencies);
+  const smolvmAvailability = await readOptionalSmolvmAvailability(dependencies);
   const runner = buildRunnerCapability({
     config,
     codexAccount,
+    smolvmAvailability,
     now: timestamp
   });
   const registration = await createClient(
@@ -363,6 +373,22 @@ async function diagnose(
         error: sanitizeError(error)
       });
     }
+
+    try {
+      const smolvm = await (dependencies.checkSmolvmAvailability ?? checkSmolvmAvailability)();
+
+      checks.push({
+        name: "smolvm",
+        ok: true,
+        detail: smolvmAvailabilityToDiagnostic(smolvm)
+      });
+    } catch (error) {
+      checks.push({
+        name: "smolvm",
+        ok: false,
+        error: sanitizeError(error)
+      });
+    }
   }
 
   writeJson(io.stdout, {
@@ -436,6 +462,16 @@ async function readOptionalCodexAccount(
   }
 }
 
+async function readOptionalSmolvmAvailability(
+  dependencies: CliDependencies
+): Promise<SmolvmAvailability | undefined> {
+  try {
+    return await (dependencies.checkSmolvmAvailability ?? checkSmolvmAvailability)();
+  } catch {
+    return undefined;
+  }
+}
+
 function createClient(
   brokerUrl: string,
   dependencies: CliDependencies
@@ -501,6 +537,26 @@ function codexRateLimitsToDiagnostic(rateLimits: CodexRateLimitState) {
     codexCliVersion: rateLimits.codexCliVersion,
     rateLimits: rateLimits.rateLimits,
     rateLimitResetCredits: rateLimits.rateLimitResetCredits
+  };
+}
+
+function smolvmAvailabilityToDiagnostic(
+  availability: SmolvmAvailability | undefined
+) {
+  if (availability === undefined) {
+    return {
+      available: false,
+      status: "unknown",
+      diagnostic: "smolvm availability could not be checked"
+    };
+  }
+
+  return {
+    available: availability.ok,
+    status: availability.status,
+    command: availability.command,
+    version: availability.ok ? availability.version : undefined,
+    diagnostic: redactDiagnosticValue(availability.diagnostic)
   };
 }
 

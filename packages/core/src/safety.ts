@@ -60,6 +60,10 @@ export const privateBetaAllowedCapabilities = [
   "sandbox.read_only",
   "sandbox.workspace_write",
   "network.disabled",
+  "smolvm.available",
+  "smolvm.workspace_snapshot",
+  "smolvm.command_bridge",
+  "artifact.extract",
   "patch.capture",
   "command.summary"
 ] as const satisfies readonly RunnerCapabilityKey[];
@@ -67,6 +71,16 @@ export const privateBetaAllowedCapabilities = [
 const allowedCapabilitySet = new Set<RunnerCapabilityKey>(
   privateBetaAllowedCapabilities
 );
+
+const smolvmCapabilitySet = new Set<RunnerCapabilityKey>([
+  "smolvm.available",
+  "smolvm.workspace_snapshot",
+  "smolvm.command_bridge",
+  "artifact.extract"
+]);
+
+const shellExecutablePattern =
+  /(?:^|\/)(?:bash|cmd|dash|fish|powershell|pwsh|sh|zsh)(?:\.exe)?$/i;
 
 const unsafePromptRules = [
   {
@@ -249,6 +263,84 @@ export function validatePrivateBetaTaskRequest(
         "requiredCapabilities",
         "patch_capture_without_patch_task",
         "Patch capture capability is limited to patch proposal tasks."
+      )
+    );
+  }
+
+  if (task.execution !== undefined) {
+    if (task.execution.network) {
+      issues.push(
+        issue(
+          "execution.network",
+          "network_not_allowed",
+          "Network-enabled isolated execution is not enabled for private beta."
+        )
+      );
+    }
+
+    if (task.type !== "patch_proposal" && task.type !== "test_investigation") {
+      issues.push(
+        issue(
+          "execution",
+          "execution_task_type_not_allowed",
+          "Isolated command execution is limited to patch proposal and test investigation tasks."
+        )
+      );
+    }
+
+    for (const capability of [
+      "smolvm.available",
+      "smolvm.workspace_snapshot",
+      "smolvm.command_bridge"
+    ] as const satisfies readonly RunnerCapabilityKey[]) {
+      if (!task.requiredCapabilities.includes(capability)) {
+        issues.push(
+          issue(
+            "requiredCapabilities",
+            "missing_smolvm_capability",
+            `smolvm execution tasks must require ${capability}.`
+          )
+        );
+      }
+    }
+
+    if (
+      task.execution.artifacts !== undefined &&
+      task.execution.artifacts.length > 0 &&
+      !task.requiredCapabilities.includes("artifact.extract")
+    ) {
+      issues.push(
+        issue(
+          "requiredCapabilities",
+          "missing_artifact_extract_capability",
+          "Tasks with isolated artifacts must require artifact extraction capability."
+        )
+      );
+    }
+
+    for (const [index, command] of task.execution.commands.entries()) {
+      const executable = command.argv[0] ?? "";
+
+      if (shellExecutablePattern.test(executable)) {
+        issues.push(
+          issue(
+            `execution.commands.${index}.argv`,
+            "shell_command_not_allowed",
+            "Isolated commands must be explicit argv commands, not maintainer-provided shell scripts."
+          )
+        );
+      }
+    }
+  } else if (
+    task.requiredCapabilities.some((capability) =>
+      smolvmCapabilitySet.has(capability)
+    )
+  ) {
+    issues.push(
+      issue(
+        "requiredCapabilities",
+        "smolvm_capability_without_execution",
+        "smolvm capabilities require an explicit execution block."
       )
     );
   }

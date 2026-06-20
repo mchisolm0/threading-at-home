@@ -10,6 +10,7 @@ import {
 import type { CodexAccountState } from "@oss-capacity/codex";
 
 import type { RunnerConfig } from "./config.js";
+import type { SmolvmAvailability } from "./smolvm.js";
 
 const supportedTaskTypes: readonly TaskType[] = [
   "analysis",
@@ -43,11 +44,19 @@ export function buildRunnerCapability(input: {
   >;
   readonly now: string;
   readonly codexAccount?: CodexAccountState;
+  readonly smolvmAvailability?: SmolvmAvailability;
 }): Omit<RunnerCapability, "volunteerUserId"> {
   const capabilities = new Set<RunnerCapabilityKey>(baseCapabilities);
 
   if (input.codexAccount?.authenticated === true) {
     capabilities.add("codex.app_server.rate_limits");
+  }
+
+  if (input.smolvmAvailability?.ok === true) {
+    capabilities.add("smolvm.available");
+    capabilities.add("smolvm.workspace_snapshot");
+    capabilities.add("smolvm.command_bridge");
+    capabilities.add("artifact.extract");
   }
 
   const runner = {

@@ -26,6 +26,30 @@ const taskPermissions = v.object({
   publicPosting: v.string()
 });
 
+const taskExecutionCommand = v.object({
+  name: v.string(),
+  argv: v.array(v.string()),
+  timeoutMs: v.optional(v.number())
+});
+
+const taskExecutionArtifact = v.object({
+  path: v.string(),
+  kind: v.string(),
+  maxBytes: v.optional(v.number()),
+  mediaType: v.optional(v.string())
+});
+
+const taskExecution = v.object({
+  isolation: v.string(),
+  image: v.string(),
+  network: v.boolean(),
+  allowHosts: v.optional(v.array(v.string())),
+  commands: v.array(taskExecutionCommand),
+  artifacts: v.optional(v.array(taskExecutionArtifact)),
+  timeoutMs: v.optional(v.number()),
+  maxOutputBytes: v.optional(v.number())
+});
+
 const taskReporting = v.object({
   destination: v.string(),
   visibility: v.string()
@@ -145,6 +169,7 @@ export default defineSchema({
     repository,
     target: taskTarget,
     permissions: taskPermissions,
+    execution: v.optional(taskExecution),
     prompt: v.string(),
     outputSchema: v.optional(jsonValue),
     reporting: taskReporting,

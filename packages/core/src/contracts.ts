@@ -74,6 +74,10 @@ export const runnerCapabilityKeys = [
   "sandbox.read_only",
   "sandbox.workspace_write",
   "network.disabled",
+  "smolvm.available",
+  "smolvm.workspace_snapshot",
+  "smolvm.command_bridge",
+  "artifact.extract",
   "patch.capture",
   "command.summary"
 ] as const;
@@ -102,6 +106,14 @@ export const patchFileStatuses = [
   "type_changed",
   "unknown"
 ] as const;
+export const resultArtifactKinds = [
+  "structured_output",
+  "log",
+  "patch",
+  "diff",
+  "transcript",
+  "command_summary"
+] as const;
 
 const utcDateTimePattern =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
@@ -111,6 +123,11 @@ const entityIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const gitRefPattern = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/;
 const contentHashPattern = /^sha256:[a-f0-9]{64}$/;
 const gitCommitShaPattern = /^[a-f0-9]{40}$/;
+const relativeWorkspacePathPattern =
+  /^(?!\/)(?![A-Za-z]:)(?!.*(?:^|\/)\.\.(?:\/|$))(?!.*\0).{1,500}$/;
+const ociImageReferencePattern = /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,255}$/;
+const networkHostPattern =
+  /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
 const jsonSchemaRecognizedKeys = [
   "$id",
   "$ref",
@@ -388,6 +405,7 @@ export const runnerCapabilityKeySchema = z.enum(runnerCapabilityKeys);
 export const resultPackageRunStatusSchema = z.enum(resultPackageRunStatuses);
 export const patchApprovalStatusSchema = z.enum(patchApprovalStatuses);
 export const patchFileStatusSchema = z.enum(patchFileStatuses);
+export const resultArtifactKindSchema = z.enum(resultArtifactKinds);
 
 export const gitRepositorySchema = z
   .object({
@@ -421,6 +439,54 @@ export const taskPermissionsSchema = z
   })
   .strict();
 
+export const taskExecutionCommandSchema = z
+  .object({
+    name: z.string().min(1).max(80).regex(/^[A-Za-z0-9][A-Za-z0-9._ -]*$/),
+    argv: z.array(z.string().min(1).max(500)).min(1).max(32),
+    timeoutMs: z.number().int().min(1_000).max(10 * 60 * 1000).optional()
+  })
+  .strict();
+
+export const taskExecutionArtifactSchema = z
+  .object({
+    path: z
+      .string()
+      .regex(relativeWorkspacePathPattern, "Expected a relative workspace path"),
+    kind: resultArtifactKindSchema,
+    maxBytes: z.number().int().min(1).max(1_000_000).optional(),
+    mediaType: z.string().min(1).max(120).optional()
+  })
+  .strict();
+
+export const taskExecutionSchema = z
+  .object({
+    isolation: z.literal("smolvm"),
+    image: z
+      .string()
+      .min(1)
+      .max(256)
+      .regex(ociImageReferencePattern, "Expected an OCI image reference"),
+    network: z.boolean(),
+    allowHosts: z
+      .array(z.string().min(1).max(253).regex(networkHostPattern))
+      .max(20)
+      .optional(),
+    commands: z.array(taskExecutionCommandSchema).min(1).max(10),
+    artifacts: z.array(taskExecutionArtifactSchema).max(25).optional(),
+    timeoutMs: z.number().int().min(1_000).max(15 * 60 * 1000).optional(),
+    maxOutputBytes: z.number().int().min(1_024).max(2 * 1024 * 1024).optional()
+  })
+  .strict()
+  .superRefine((execution, context) => {
+    if (!execution.network && execution.allowHosts !== undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "allowHosts can only be set when execution network is enabled",
+        path: ["allowHosts"]
+      });
+    }
+  });
+
 export const taskReportingSchema = z
   .object({
     destination: resultDestinationSchema,
@@ -442,6 +508,7 @@ export const taskRequestSchema = z
     repository: gitRepositorySchema,
     target: taskTargetSchema,
     permissions: taskPermissionsSchema,
+    execution: taskExecutionSchema.optional(),
     prompt: z.string().min(1).max(40_000),
     outputSchema: jsonSchemaSchema.optional(),
     reporting: taskReportingSchema,
@@ -620,14 +687,7 @@ export const codexUsageSchema = z
 
 export const resultArtifactSchema = z
   .object({
-    kind: z.enum([
-      "structured_output",
-      "log",
-      "patch",
-      "diff",
-      "transcript",
-      "command_summary"
-    ]),
+    kind: resultArtifactKindSchema,
     storageKey: z.string().min(1).max(500),
     sha256: contentHashSchema,
     byteLength: z.number().int().min(0),
@@ -758,6 +818,9 @@ export type ResultPackageRunStatus = z.infer<typeof resultPackageRunStatusSchema
 export type PatchApprovalStatus = z.infer<typeof patchApprovalStatusSchema>;
 export type PatchFileStatus = z.infer<typeof patchFileStatusSchema>;
 export type TaskRequest = z.infer<typeof taskRequestSchema>;
+export type TaskExecution = z.infer<typeof taskExecutionSchema>;
+export type TaskExecutionCommand = z.infer<typeof taskExecutionCommandSchema>;
+export type TaskExecutionArtifact = z.infer<typeof taskExecutionArtifactSchema>;
 export type VolunteerPolicy = z.infer<typeof volunteerPolicySchema>;
 export type RunnerCapability = z.infer<typeof runnerCapabilitySchema>;
 export type TaskLease = z.infer<typeof taskLeaseSchema>;
