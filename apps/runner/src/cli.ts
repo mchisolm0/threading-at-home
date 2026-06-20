@@ -1,8 +1,7 @@
-import { inspect } from "node:util";
-
 import {
   readCodexAccountState,
   readCodexRateLimits,
+  runCodexExec,
   type CodexAccountState,
   type CodexRateLimitState
 } from "@oss-capacity/codex";
@@ -18,7 +17,10 @@ import {
   writeRunnerConfig,
   type RunnerConfig
 } from "./config.js";
+import { defaultRunnerStatePath, runOnce } from "./runLoop.js";
+import { redactDiagnosticValue, sanitizeError } from "./sanitize.js";
 import { createLocalRunnerAuthHash, hashToken } from "./token.js";
+import type { WorkspaceDependencies } from "./workspace.js";
 
 const defaultMaxOutputBytes = 2 * 1024 * 1024;
 
@@ -35,9 +37,10 @@ export type CliDependencies = {
   readonly createBrokerClient?: typeof createBrokerClient;
   readonly readCodexAccountState?: typeof readCodexAccountState;
   readonly readCodexRateLimits?: typeof readCodexRateLimits;
+  readonly runCodexExec?: typeof runCodexExec;
   readonly createRunnerId?: typeof createRunnerId;
   readonly createLocalRunnerAuthHash?: typeof createLocalRunnerAuthHash;
-};
+} & WorkspaceDependencies;
 
 type ParsedArgs = {
   readonly command: string;
@@ -83,6 +86,9 @@ export async function runCli(
       case "doctor":
         await diagnose(parsed, io, dependencies);
         return 0;
+      case "run-once":
+      case "once":
+        return await runOnceCommand(parsed, io, dependencies);
       case "help":
       case "--help":
       case "-h":
@@ -365,6 +371,44 @@ async function diagnose(
   });
 }
 
+async function runOnceCommand(
+  parsed: ParsedArgs,
+  io: CliIO,
+  dependencies: CliDependencies
+): Promise<number> {
+  const configPath = optionString(parsed, "config") ?? defaultConfigPath(io.env);
+  const config = await (dependencies.readConfig ?? readRunnerConfig)(configPath);
+  const workspaceRoot =
+    optionString(parsed, "workspace-dir") ??
+    io.env.OSS_CAPACITY_RUNNER_WORKSPACE_DIR ??
+    defaultRunnerStatePath("workspaces", io.env);
+  const logRoot =
+    optionString(parsed, "log-dir") ??
+    io.env.OSS_CAPACITY_RUNNER_LOG_DIR ??
+    defaultRunnerStatePath("logs", io.env);
+  const result = await runOnce({
+    config,
+    broker: createClient(config.brokerUrl, dependencies),
+    workspaceRoot,
+    logRoot,
+    taskRequestId: optionString(parsed, "task-request-id"),
+    leaseMinutes: parsePositiveIntegerOption(
+      optionString(parsed, "lease-minutes"),
+      30,
+      "lease-minutes"
+    ),
+    codexTimeoutMs: parsePositiveIntegerOption(
+      optionString(parsed, "codex-timeout-ms"),
+      10 * 60 * 1000,
+      "codex-timeout-ms"
+    ),
+    dependencies
+  });
+
+  writeJson(io.stdout, result);
+  return result.ok ? 0 : 1;
+}
+
 async function fetchRunnerConfiguration(
   parsed: ParsedArgs,
   io: CliIO,
@@ -472,39 +516,13 @@ function formatError(error: unknown): string {
   return `Error: ${sanitizeError(error)}`;
 }
 
-function sanitizeError(error: unknown): string {
-  const message =
-    error instanceof Error ? error.message : inspect(error, { depth: 1 });
-
-  return sanitizeText(message);
-}
-
-function redactDiagnosticValue<T>(value: T): T {
-  const serialized = JSON.stringify(value);
-
-  if (serialized === undefined) {
-    return value;
-  }
-
-  return JSON.parse(sanitizeText(serialized)) as T;
-}
-
-function sanitizeText(value: string): string {
-  return value
-    .replace(/sha256:[a-f0-9]{64}/gi, "[redacted]")
-    .replace(/ocr_[A-Za-z0-9._-]+/g, "[redacted]")
-    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[redacted]")
-    .replace(/(^|[\s'"])(\/(?:Users|home|tmp|var|private)\/[^ "'\n]+)/g, "$1[redacted-path]")
-    .replace(/\/Users\/[^ "'\n]+/g, "[redacted-path]")
-    .replace(/\\Users\\[^ "'\n]+/g, "[redacted-path]");
-}
-
 function helpText(): string {
   return `OSS Capacity runner
 
 Usage:
   oss-capacity-runner login --broker-url <url> --setup-token <token> [--name <label>]
   oss-capacity-runner heartbeat
+  oss-capacity-runner run-once
   oss-capacity-runner policy
   oss-capacity-runner subscriptions
   oss-capacity-runner diagnose
@@ -516,5 +534,10 @@ Options:
   --token <token>            Alias for --setup-token.
   --codex-bin <command>      Codex CLI command, default: codex.
   --max-output-bytes <n>     Local output preference for future runs.
+  --workspace-dir <path>     Override the local repository cache directory.
+  --log-dir <path>           Override the local sanitized runner log directory.
+  --task-request-id <id>     Request a specific eligible task.
+  --lease-minutes <n>        Lease duration for run-once, default: 30.
+  --codex-timeout-ms <n>     Codex execution timeout for run-once.
 `;
 }

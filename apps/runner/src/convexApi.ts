@@ -1,6 +1,12 @@
 import { makeFunctionReference } from "convex/server";
 
-import type { RunnerCapability, VolunteerPolicy } from "@oss-capacity/core";
+import type {
+  ResultPackage,
+  RunnerCapability,
+  TaskLease,
+  TaskRequest,
+  VolunteerPolicy
+} from "@oss-capacity/core";
 
 export type RunnerRegistrationView = {
   readonly runnerId: string;
@@ -40,6 +46,11 @@ export type RunnerConfigurationView = {
   readonly subscriptions: readonly RunnerSubscriptionView[];
 };
 
+export type RunnerLeaseView = {
+  readonly task: TaskRequest;
+  readonly lease: TaskLease;
+};
+
 export const runnerConvexApi = {
   exchangeRunnerSetupToken: makeFunctionReference<
     "mutation",
@@ -68,5 +79,49 @@ export const runnerConvexApi = {
       runnerAuthTokenHash: string;
     },
     RunnerConfigurationView
-  >("volunteer:runnerConfiguration")
+  >("volunteer:runnerConfiguration"),
+  eligibleTask: makeFunctionReference<
+    "query",
+    {
+      runnerId: string;
+      runnerAuthTokenHash: string;
+      now: string;
+      taskRequestId?: string;
+    },
+    TaskRequest | null
+  >("volunteer:eligibleTask"),
+  leaseEligibleTask: makeFunctionReference<
+    "mutation",
+    {
+      runnerId: string;
+      runnerAuthTokenHash: string;
+      leaseId: string;
+      runId: string;
+      leaseTokenHash: string;
+      now: string;
+      expiresAt: string;
+      taskRequestId?: string;
+    },
+    RunnerLeaseView | null
+  >("volunteer:leaseEligibleTask"),
+  completeRun: makeFunctionReference<
+    "mutation",
+    {
+      runnerId: string;
+      runnerAuthTokenHash: string;
+      resultPackage: ResultPackage;
+      now: string;
+    },
+    ResultPackage
+  >("volunteer:completeRun"),
+  failRun: makeFunctionReference<
+    "mutation",
+    {
+      runnerId: string;
+      runnerAuthTokenHash: string;
+      resultPackage: ResultPackage;
+      now: string;
+    },
+    ResultPackage
+  >("volunteer:failRun")
 };
