@@ -60,6 +60,30 @@ describe("lifecycle planning helpers", () => {
     ).toBe(true);
   });
 
+  it("allows UI-created schema tasks that require read-only runner capabilities", () => {
+    expect(
+      canLeaseTask(
+        {
+          task: {
+            ...exampleTaskRequest,
+            requiredCapabilities: [
+              "codex.exec.json",
+              "codex.exec.output_schema",
+              "sandbox.read_only",
+              "network.disabled"
+            ]
+          },
+          activeLeaseCount: 0,
+          runCount: 0,
+          subscription,
+          policy: enabledPolicy
+        },
+        exampleRunnerCapability,
+        now
+      )
+    ).toBe(true);
+  });
+
   it("rejects a task that already has an active unexpired lease", () => {
     expect(
       canLeaseTask(

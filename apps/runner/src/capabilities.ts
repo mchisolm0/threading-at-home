@@ -21,6 +21,8 @@ const supportedTaskTypes: readonly TaskType[] = [
 ];
 
 const baseCapabilities: readonly RunnerCapabilityKey[] = [
+  "codex.exec.json",
+  "codex.exec.output_schema",
   "codex.version_detection",
   "sandbox.read_only",
   "network.disabled",
