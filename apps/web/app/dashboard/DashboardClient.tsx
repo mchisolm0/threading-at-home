@@ -766,9 +766,23 @@ export function DashboardClient() {
                 <select
                   id="taskType"
                   value={taskForm.type}
-                  onChange={(event) =>
-                    updateTaskForm({ type: event.target.value as TaskFormState["type"] })
-                  }
+                  onChange={(event) => {
+                    const type = event.target.value as TaskFormState["type"];
+
+                    updateTaskForm(
+                      type === "patch_proposal"
+                        ? {
+                            type,
+                            sandbox: "workspace-write",
+                            allowPatches: true
+                          }
+                        : {
+                            type,
+                            sandbox: "read-only",
+                            allowPatches: false
+                          }
+                    );
+                  }}
                 >
                   {taskTypes.map((type) => (
                     <option key={type} value={type}>

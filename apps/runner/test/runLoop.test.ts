@@ -279,6 +279,143 @@ describe("runner run-once loop", () => {
     );
   });
 
+  it("runs eligible patch proposal tasks in workspace-write mode and uploads a patch artifact", async () => {
+    const calls: unknown[] = [];
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "oss-capacity-workspaces-"));
+    const logRoot = await mkdtemp(join(tmpdir(), "oss-capacity-logs-"));
+    const patchTask = {
+      ...exampleTaskRequest,
+      type: "patch_proposal" as const,
+      permissions: {
+        sandbox: "workspace-write" as const,
+        network: false,
+        allowPatches: true,
+        publicPosting: "maintainer_only" as const
+      },
+      requiredCapabilities: [
+        "codex.exec.json" as const,
+        "codex.exec.output_schema" as const,
+        "sandbox.workspace_write" as const,
+        "network.disabled" as const,
+        "patch.capture" as const
+      ]
+    };
+    const result = await runOnce({
+      config,
+      broker: createBroker(calls, {
+        eligibleTask: async (input) => {
+          calls.push({ method: "eligibleTask", input });
+          return patchTask;
+        },
+        leaseEligibleTask: async (input) => {
+          calls.push({ method: "leaseEligibleTask", input });
+
+          return {
+            task: patchTask,
+            lease: {
+              ...exampleTaskLease,
+              leaseId: input.leaseId,
+              runId: input.runId,
+              runnerId: input.runnerId,
+              leasedAt: input.now,
+              expiresAt: input.expiresAt,
+              heartbeatAt: input.now,
+              taskSnapshotHash,
+              leaseTokenHash: input.leaseTokenHash
+            }
+          };
+        }
+      }),
+      workspaceRoot,
+      logRoot,
+      dependencies: {
+        now: () => now,
+        readCodexAccountState: async () => ({
+          codexCliVersion: "0.140.0",
+          authenticated: true,
+          authMode: "chatgpt"
+        }),
+        readCodexRateLimits: async () => ({
+          account: {
+            authenticated: true,
+            authMode: "chatgpt"
+          },
+          rateLimits: [{ usedPercent: 10 }]
+        }),
+        exec: async (_file, args) => {
+          if (args.includes("rev-parse")) {
+            return {
+              stdout: "0123456789abcdef0123456789abcdef01234567\n",
+              stderr: ""
+            };
+          }
+
+          if (args.includes("--name-status")) {
+            return { stdout: "M\tsrc/widget.ts\n", stderr: "" };
+          }
+
+          if (args.includes("--numstat")) {
+            return { stdout: "1\t1\tsrc/widget.ts\n", stderr: "" };
+          }
+
+          if (args.includes("diff")) {
+            return {
+              stdout:
+                "diff --git a/src/widget.ts b/src/widget.ts\n@@ -1 +1 @@\n-old\n+new\n",
+              stderr: ""
+            };
+          }
+
+          return { stdout: "", stderr: "" };
+        },
+        runCodexExec: async (options) => {
+          expect(options.sandbox).toBe("workspace-write");
+          expect(options.prompt).toContain("patch proposal task");
+          expect(options.prompt).toContain("Do not create commits");
+
+          return {
+            codexCliVersion: "0.140.0",
+            finalMessage: "patch ready",
+            structuredOutput: {
+              path: String(options.structuredOutputPath),
+              text: "{}",
+              json: {
+                summary: "Prepared a minimal patch.",
+                risks: []
+              }
+            },
+            events: [{ type: "turn.completed" }],
+            logs: [],
+            exitCode: 0
+          };
+        }
+      }
+    });
+    const completeCall = calls.find(
+      (call): call is { method: "completeRun"; input: { resultPackage: ResultPackage } } =>
+        typeof call === "object" &&
+        call !== null &&
+        "method" in call &&
+        call.method === "completeRun"
+    );
+
+    expect(result.status).toBe("completed");
+    expect(completeCall?.input.resultPackage.sandbox).toBe("workspace-write");
+    expect(completeCall?.input.resultPackage.patchArtifact).toMatchObject({
+      kind: "unified_diff",
+      approvalStatus: "pending",
+      fileCount: 1
+    });
+    expect(completeCall?.input.resultPackage.artifacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "patch",
+          mediaType: "text/x-diff"
+        })
+      ])
+    );
+  });
+
   it("omits Codex version from uploaded results when privacy policy disables sharing", async () => {
     const calls: unknown[] = [];
     const workspaceRoot = await mkdtemp(join(tmpdir(), "oss-capacity-workspaces-"));

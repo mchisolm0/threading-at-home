@@ -95,4 +95,4 @@ The repository includes mocked tests for webhook signature verification, install
 
 Live GitHub verification requires real OAuth credentials, a GitHub App private key, an installation, and webhook delivery. Without those secrets, run the local checks and use the dashboard only after manually configuring the Convex environment above.
 
-Manual result promotion additionally requires the GitHub App installation to include Issues write permission for the target repository. The result detail page supports issue comments and new issues for the read-only MVP. Branch and pull request promotion remains disabled until patch artifacts and maintainer patch approval are implemented.
+Manual result promotion additionally requires the GitHub App installation to include Issues write permission for the target repository. The result detail page supports issue comments and new issues for read-only results. Patch proposal results can be reviewed and explicitly approved or rejected from the maintainer inbox, but branch and pull request publishing remains disabled in Task 7.2. No runner-triggered or automatic GitHub repository write occurs.

@@ -83,6 +83,79 @@ describe("GitHub promotion previews", () => {
     expect(preview.body).toBe("");
   });
 
+  it("requires patch approval before branch or pull request promotion", () => {
+    const preview = buildGitHubPromotionPreview({
+      repositoryFullName: exampleTaskRequest.repository.fullName,
+      task: {
+        ...exampleTaskRequest,
+        type: "patch_proposal"
+      },
+      resultPackage: {
+        ...exampleResultPackage,
+        sandbox: "workspace-write",
+        patchArtifact: {
+          kind: "unified_diff",
+          baseCommitSha: "0123456789abcdef0123456789abcdef01234567",
+          sha256: `sha256:${"e".repeat(64)}`,
+          byteLength: 96,
+          truncated: false,
+          fileCount: 1,
+          changedFiles: [
+            {
+              path: "src/widget.ts",
+              status: "modified",
+              additions: 1,
+              deletions: 1
+            }
+          ],
+          diff: "diff --git a/src/widget.ts b/src/widget.ts\n-old\n+new",
+          approvalStatus: "pending"
+        }
+      },
+      target: {
+        kind: "patch_pull_request",
+        disabledReason: "fallback"
+      },
+      attributionMode: "app"
+    });
+
+    expect(preview.body).toContain("Approval status: `pending`");
+    expect(preview.body).toContain("```diff");
+    expect(preview.disabledReason).toContain("requires explicit maintainer patch approval");
+  });
+
+  it("keeps approved patch publishing disabled until a later slice", () => {
+    const preview = buildGitHubPromotionPreview({
+      repositoryFullName: exampleTaskRequest.repository.fullName,
+      task: {
+        ...exampleTaskRequest,
+        type: "patch_proposal"
+      },
+      resultPackage: {
+        ...exampleResultPackage,
+        sandbox: "workspace-write",
+        patchArtifact: {
+          kind: "unified_diff",
+          baseCommitSha: "0123456789abcdef0123456789abcdef01234567",
+          sha256: `sha256:${"e".repeat(64)}`,
+          byteLength: 96,
+          truncated: false,
+          fileCount: 1,
+          changedFiles: [],
+          diff: "diff --git a/src/widget.ts b/src/widget.ts\n-old\n+new",
+          approvalStatus: "approved"
+        }
+      },
+      target: {
+        kind: "patch_pull_request",
+        disabledReason: "fallback"
+      },
+      attributionMode: "app"
+    });
+
+    expect(preview.disabledReason).toContain("publishing remains disabled");
+  });
+
   it("validates current MVP promotion targets", () => {
     expect(() =>
       normalizeGitHubPromotionTarget({

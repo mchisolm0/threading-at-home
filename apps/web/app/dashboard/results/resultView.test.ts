@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { exampleResultPackage } from "@oss-capacity/core";
 
 import {
+  diffLines,
   formatDurationMs,
   structuredEntries,
   totalCommandDurationMs
@@ -57,5 +58,13 @@ describe("result view helpers", () => {
         ]
       })
     ).toBe(3_500);
+  });
+
+  it("classifies unified diff lines for patch review", () => {
+    expect(
+      diffLines(
+        "diff --git a/src/a.ts b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n context"
+      ).map((line) => line.kind)
+    ).toEqual(["metadata", "hunk", "deletion", "addition", "context"]);
   });
 });

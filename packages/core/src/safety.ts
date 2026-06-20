@@ -58,7 +58,9 @@ export const privateBetaAllowedCapabilities = [
   "codex.app_server.rate_limits",
   "codex.version_detection",
   "sandbox.read_only",
+  "sandbox.workspace_write",
   "network.disabled",
+  "patch.capture",
   "command.summary"
 ] as const satisfies readonly RunnerCapabilityKey[];
 
@@ -78,6 +80,12 @@ const unsafePromptRules = [
     pattern:
       /\b(?:edit|modify|write|rewrite|change|patch|diff|commit|branch|push|merge|open a pr|pull request|create files?|delete files?)\b/i,
     message: "Private beta tasks must be read-only and cannot ask for writes or patches."
+  },
+  {
+    code: "repository_publish_request",
+    pattern:
+      /\b(?:commit|branch|push|merge|open a pr|open pull request|create pull request|pull request)\b/i,
+    message: "Patch proposal tasks cannot ask Codex to publish, push, branch, merge, or open pull requests."
   },
   {
     code: "credential_request",
@@ -148,12 +156,31 @@ export function validatePrivateBetaTaskRequest(
 ): readonly SafetyIssue[] {
   const issues: SafetyIssue[] = [];
   const sizeCap = privateBetaTaskSizeCaps[task.expectedSize];
+  const isPatchProposal =
+    task.type === "patch_proposal" &&
+    task.permissions.sandbox === "workspace-write" &&
+    task.permissions.allowPatches;
 
-  issues.push(...lintTaskPrompt(task.prompt));
+  issues.push(
+    ...lintTaskPrompt(task.prompt).filter(
+      (promptIssue) =>
+        promptIssue.code !== "patch_or_write_request" || !isPatchProposal
+    )
+  );
 
-  if (task.permissions.sandbox !== "read-only") {
+  if (
+    (task.type === "patch_proposal" &&
+      task.permissions.sandbox !== "workspace-write") ||
+    (task.type !== "patch_proposal" && task.permissions.sandbox !== "read-only")
+  ) {
     issues.push(
-      issue("permissions.sandbox", "unsupported_sandbox", "Only read-only tasks are enabled for private beta.")
+      issue(
+        "permissions.sandbox",
+        "unsupported_sandbox",
+        task.type === "patch_proposal"
+          ? "Patch proposal tasks must use workspace-write sandbox."
+          : "Only read-only sandbox is enabled for non-patch private beta tasks."
+      )
     );
   }
 
@@ -163,9 +190,18 @@ export function validatePrivateBetaTaskRequest(
     );
   }
 
-  if (task.permissions.allowPatches) {
+  if (
+    (task.type === "patch_proposal" && !task.permissions.allowPatches) ||
+    (task.type !== "patch_proposal" && task.permissions.allowPatches)
+  ) {
     issues.push(
-      issue("permissions.allowPatches", "patches_not_allowed", "Patch capture and patch proposals are not enabled for private beta.")
+      issue(
+        "permissions.allowPatches",
+        "patch_permission_mismatch",
+        task.type === "patch_proposal"
+          ? "Patch proposal tasks must request patch capture."
+          : "Only patch proposal tasks can request patch capture."
+      )
     );
   }
 
@@ -188,8 +224,32 @@ export function validatePrivateBetaTaskRequest(
   }
 
   if (task.type === "patch_proposal") {
+    if (!task.requiredCapabilities.includes("sandbox.workspace_write")) {
+      issues.push(
+        issue(
+          "requiredCapabilities",
+          "missing_workspace_write_capability",
+          "Patch proposal tasks must require workspace-write sandbox capability."
+        )
+      );
+    }
+
+    if (!task.requiredCapabilities.includes("patch.capture")) {
+      issues.push(
+        issue(
+          "requiredCapabilities",
+          "missing_patch_capture_capability",
+          "Patch proposal tasks must require patch capture capability."
+        )
+      );
+    }
+  } else if (task.requiredCapabilities.includes("patch.capture")) {
     issues.push(
-      issue("type", "patch_proposal_not_allowed", "Patch proposal tasks are not enabled until the next roadmap phase.")
+      issue(
+        "requiredCapabilities",
+        "patch_capture_without_patch_task",
+        "Patch capture capability is limited to patch proposal tasks."
+      )
     );
   }
 
@@ -371,6 +431,21 @@ export function redactResultPackage(resultPackage: ResultPackage): ResultPackage
       command: redactSensitiveText(command.command),
       summary: redactSensitiveText(command.summary)
     })),
+    patchArtifact:
+      resultPackage.patchArtifact === undefined
+        ? undefined
+        : {
+            ...resultPackage.patchArtifact,
+            changedFiles: resultPackage.patchArtifact.changedFiles.map((file) => ({
+              ...file,
+              path: redactSensitiveText(file.path),
+              oldPath:
+                file.oldPath === undefined
+                  ? undefined
+                  : redactSensitiveText(file.oldPath)
+            })),
+            diff: redactSensitiveText(resultPackage.patchArtifact.diff)
+          },
     warnings: resultPackage.warnings.map((warning) => redactSensitiveText(warning)),
     error:
       resultPackage.error === undefined

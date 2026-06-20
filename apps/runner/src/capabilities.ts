@@ -14,6 +14,7 @@ import type { RunnerConfig } from "./config.js";
 const supportedTaskTypes: readonly TaskType[] = [
   "analysis",
   "triage",
+  "patch_proposal",
   "test_investigation",
   "docs_draft",
   "security_review",
@@ -25,7 +26,9 @@ const baseCapabilities: readonly RunnerCapabilityKey[] = [
   "codex.exec.output_schema",
   "codex.version_detection",
   "sandbox.read_only",
+  "sandbox.workspace_write",
   "network.disabled",
+  "patch.capture",
   "command.summary"
 ];
 
@@ -55,9 +58,9 @@ export function buildRunnerCapability(input: {
     architecture: normalizeArchitecture(arch()),
     codexCliVersion: input.codexAccount?.codexCliVersion,
     codexAuthMode: normalizeCodexAuthMode(input.codexAccount?.authMode),
-    supportedSandboxModes: ["read-only"],
+    supportedSandboxModes: ["read-only", "workspace-write"],
     supportsNetwork: false,
-    supportsPatchCapture: false,
+    supportsPatchCapture: true,
     supportedTaskTypes,
     supportedCapabilities: [...capabilities],
     maxOutputBytes: input.config.maxOutputBytes,

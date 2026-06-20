@@ -4,14 +4,16 @@ import type {
   GitHubPromotionAttributionMode,
   GitHubPromotionPreview,
   GitHubPromotionTarget,
-  JsonValue
+  JsonValue,
+  PatchArtifact
 } from "@oss-capacity/core";
-import { useAction, useQuery } from "convex/react";
+import { useAction, useMutation, useQuery } from "convex/react";
 import Link from "next/link";
 import { useState } from "react";
 
 import { convexApi, type PromotionResultView } from "../../../convexApi";
 import {
+  diffLines,
   formatDurationMs,
   formatLabel,
   formatNumber,
@@ -68,6 +70,145 @@ function StructuredOutput({
         </div>
       ))}
     </dl>
+  );
+}
+
+function PatchReviewPanel({
+  resultPackageId,
+  patch,
+  approvals
+}: {
+  readonly resultPackageId: string;
+  readonly patch: PatchArtifact;
+  readonly approvals: readonly {
+    readonly decision: string;
+    readonly note?: string;
+    readonly createdAt: string;
+  }[];
+}) {
+  const recordPatchApproval = useMutation(convexApi.lifecycle.recordPatchApproval);
+  const [note, setNote] = useState("");
+  const [pendingDecision, setPendingDecision] = useState<"approved" | "rejected" | null>(
+    null
+  );
+  const [error, setError] = useState<string | null>(null);
+  const latestApproval = approvals[0];
+  const lines = diffLines(patch.diff);
+
+  async function decide(decision: "approved" | "rejected") {
+    setPendingDecision(decision);
+    setError(null);
+
+    try {
+      await recordPatchApproval({
+        resultPackageId,
+        decision,
+        note: note.trim().length === 0 ? undefined : note,
+        now: new Date().toISOString()
+      });
+      setNote("");
+    } catch (approvalError) {
+      setError(
+        approvalError instanceof Error ? approvalError.message : String(approvalError)
+      );
+    } finally {
+      setPendingDecision(null);
+    }
+  }
+
+  return (
+    <div className="panel patch-panel">
+      <div className="panel-heading inline">
+        <div>
+          <p className="eyebrow">Patch proposal</p>
+          <h2>Diff review</h2>
+        </div>
+        <StatusBadge status={latestApproval?.decision ?? patch.approvalStatus} />
+      </div>
+
+      <dl className="detail-list patch-metadata">
+        <div>
+          <dt>Base commit</dt>
+          <dd>{patch.baseCommitSha ?? "not reported"}</dd>
+        </div>
+        <div>
+          <dt>Patch SHA-256</dt>
+          <dd>{patch.sha256}</dd>
+        </div>
+        <div>
+          <dt>Files</dt>
+          <dd>{formatNumber(patch.fileCount)}</dd>
+        </div>
+        <div>
+          <dt>Bytes</dt>
+          <dd>
+            {formatNumber(patch.byteLength)}
+            {patch.truncated ? " (truncated)" : ""}
+          </dd>
+        </div>
+      </dl>
+
+      {patch.changedFiles.length === 0 ? null : (
+        <ul className="patch-file-list">
+          {patch.changedFiles.map((file) => (
+            <li key={`${file.status}:${file.oldPath ?? ""}:${file.path}`}>
+              <strong>{file.path}</strong>
+              <small>
+                {formatLabel(file.status)}
+                {file.additions === undefined ? "" : ` +${file.additions}`}
+                {file.deletions === undefined ? "" : ` -${file.deletions}`}
+              </small>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <pre className="diff-block">
+        {lines.map((line) => (
+          <span className={`diff-line diff-${line.kind}`} key={line.key}>
+            {line.text.length === 0 ? " " : line.text}
+            {"\n"}
+          </span>
+        ))}
+      </pre>
+
+      <div className="field">
+        <label htmlFor="patchReviewNote">Review note</label>
+        <textarea
+          id="patchReviewNote"
+          rows={3}
+          value={note}
+          onChange={(event) => setNote(event.target.value)}
+        />
+      </div>
+
+      <div className="form-actions">
+        <button
+          type="button"
+          disabled={pendingDecision !== null}
+          onClick={() => void decide("approved")}
+        >
+          {pendingDecision === "approved" ? "Approving..." : "Approve patch"}
+        </button>
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={pendingDecision !== null}
+          onClick={() => void decide("rejected")}
+        >
+          {pendingDecision === "rejected" ? "Rejecting..." : "Reject patch"}
+        </button>
+      </div>
+
+      {latestApproval === undefined ? null : (
+        <p className="status-message">
+          Latest decision: {latestApproval.decision} at {latestApproval.createdAt}
+          {latestApproval.note === undefined ? "" : ` - ${latestApproval.note}`}
+        </p>
+      )}
+
+      {error === null ? null : <p className="field-error">{error}</p>}
+    </div>
   );
 }
 
@@ -148,12 +289,12 @@ function PromotionPanel({
 
     return {
       kind: "patch_pull_request",
-      disabledReason: "Patch pull request promotion is reserved for Task 7.2."
+      disabledReason: "Patch pull request publishing is disabled pending maintainer approval and the next publishing slice."
     };
   }
 
   const target = currentTarget();
-  const canPreview = target !== null && target.kind !== "patch_pull_request";
+  const canPreview = target !== null;
   const canPost =
     preview !== undefined &&
     preview !== null &&
@@ -263,7 +404,7 @@ function PromotionPanel({
 
       {targetKind === "patch_pull_request" ? (
         <p className="status-message">
-          Branch and pull request promotion is reserved for patch artifacts.
+          Branch and pull request publishing is disabled. Review and approve the captured patch before any future GitHub write path can be enabled.
         </p>
       ) : null}
 
@@ -272,7 +413,7 @@ function PromotionPanel({
           type="button"
           disabled={!canPreview}
           onClick={() => {
-            if (target === null || target.kind === "patch_pull_request") {
+            if (target === null) {
               return;
             }
 
@@ -287,14 +428,16 @@ function PromotionPanel({
         >
           Preview
         </button>
-        <button
-          type="button"
-          className="secondary-button"
-          disabled={!canPost || isPosting}
-          onClick={() => void postPromotion()}
-        >
-          {isPosting ? "Posting..." : "Post to GitHub"}
-        </button>
+        {targetKind === "patch_pull_request" ? null : (
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={!canPost || isPosting}
+            onClick={() => void postPromotion()}
+          >
+            {isPosting ? "Posting..." : "Post to GitHub"}
+          </button>
+        )}
       </div>
 
       {previewRequest !== null && preview === undefined ? (
@@ -335,6 +478,10 @@ function PromotionPanel({
             <span className="field-label">Body</span>
             <pre className="json-block">{preview.body}</pre>
           </div>
+
+          {preview.disabledReason === undefined ? null : (
+            <p className="status-message">{preview.disabledReason}</p>
+          )}
         </div>
       ) : null}
 
@@ -522,6 +669,14 @@ export function ResultDetailClient({
         resultPackageId={resultPackage.resultPackageId}
         defaultIssueTitle={`OSS Capacity result: ${task.title}`}
       />
+
+      {resultPackage.patchArtifact === undefined ? null : (
+        <PatchReviewPanel
+          resultPackageId={resultPackage.resultPackageId}
+          patch={resultPackage.patchArtifact}
+          approvals={result.patchApprovals}
+        />
+      )}
 
       <div className="detail-grid">
         <div className="panel">

@@ -237,11 +237,34 @@ describe("shared domain contracts", () => {
     );
   });
 
+  it("allows tightly scoped private beta patch proposal tasks", () => {
+    expect(
+      validatePrivateBetaTaskRequest({
+        ...exampleTaskRequest,
+        type: "patch_proposal",
+        prompt: "Edit the failing unit test fixture and propose a minimal diff for maintainer review.",
+        permissions: {
+          sandbox: "workspace-write",
+          network: false,
+          allowPatches: true,
+          publicPosting: "maintainer_only"
+        },
+        requiredCapabilities: [
+          "codex.exec.json",
+          "codex.exec.output_schema",
+          "sandbox.workspace_write",
+          "network.disabled",
+          "patch.capture"
+        ]
+      })
+    ).toEqual([]);
+  });
+
   it("applies private beta task permission gates and size caps", () => {
     const result = validatePrivateBetaTaskRequest({
       ...exampleTaskRequest,
       type: "patch_proposal",
-      prompt: "Suggest a patch and commit it.",
+      prompt: "Suggest a patch and commit it, push a branch, then open a PR.",
       permissions: {
         sandbox: "workspace-write",
         network: true,
@@ -261,16 +284,43 @@ describe("shared domain contracts", () => {
 
     expect(result).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ code: "patch_or_write_request" }),
-        expect.objectContaining({ code: "unsupported_sandbox" }),
+        expect.objectContaining({ code: "repository_publish_request" }),
         expect.objectContaining({ code: "network_not_allowed" }),
-        expect.objectContaining({ code: "patches_not_allowed" }),
         expect.objectContaining({ code: "public_posting_not_allowed" }),
         expect.objectContaining({ code: "unsupported_visibility" }),
-        expect.objectContaining({ code: "patch_proposal_not_allowed" }),
-        expect.objectContaining({ code: "unsupported_capability" })
+        expect.objectContaining({ code: "missing_output_schema_capability" })
       ])
     );
+  });
+
+  it("validates and redacts patch artifacts", () => {
+    const result = parseResultPackage({
+      ...exampleResultPackage,
+      sandbox: "workspace-write",
+      patchArtifact: {
+        kind: "unified_diff",
+        baseCommitSha: "0123456789abcdef0123456789abcdef01234567",
+        sha256: `sha256:${"e".repeat(64)}`,
+        byteLength: 128,
+        truncated: false,
+        fileCount: 1,
+        changedFiles: [
+          {
+            path: "src/widget.ts",
+            status: "modified",
+            additions: 2,
+            deletions: 1
+          }
+        ],
+        diff: "diff --git a/src/widget.ts b/src/widget.ts\n+const token = sk-test1234567890;",
+        approvalStatus: "pending"
+      }
+    });
+    const redacted = redactResultPackage(result);
+
+    expect(redacted.patchArtifact?.approvalStatus).toBe("pending");
+    expect(redacted.patchArtifact?.diff).not.toContain("sk-test1234567890");
+    expect(redacted.patchArtifact?.diff).toContain("[redacted]");
   });
 
   it("enforces private beta rate limit snapshots", () => {

@@ -10,6 +10,7 @@ import {
   readCodexRateLimits,
   runCodexExec,
   type CodexAccountState,
+  type CodexExecSandboxMode,
   type CodexExecResult,
   type CodexRateLimitState
 } from "@oss-capacity/codex";
@@ -24,9 +25,11 @@ import {
 
 import type { BrokerClient, RunnerLeaseView } from "./broker.js";
 import type { RunnerConfig } from "./config.js";
+import { captureWorkspacePatch } from "./patchCapture.js";
 import { sanitizeError, sanitizeText } from "./sanitize.js";
 import {
   ensureCleanWorkspace,
+  type WorkspaceExec,
   type WorkspaceCheckout,
   type WorkspaceDependencies
 } from "./workspace.js";
@@ -182,6 +185,7 @@ export async function runOnce(input: {
 
     await mkdir(dirname(structuredOutputPath), { recursive: true });
 
+    const sandbox = codexSandboxMode(lease.task.permissions.sandbox);
     const codex = await (dependencies.runCodexExec ?? runCodexExec)({
       codexBin: input.config.codexBin,
       prompt: buildCodexPrompt(lease.task),
@@ -192,16 +196,26 @@ export async function runOnce(input: {
           ? undefined
           : { schema: lease.task.outputSchema },
       structuredOutputPath,
-      sandbox: "read-only",
+      sandbox,
       config: {
         "shell_environment_policy.inherit": "none"
       }
     });
     const completedAt = now().toISOString();
+    const patchCapture =
+      lease.task.permissions.allowPatches && sandbox === "workspace-write"
+        ? await captureWorkspacePatch({
+            cwd: workspace.path,
+            baseCommitSha: workspace.repositoryCommitSha,
+            exec: dependencies.exec ?? defaultWorkspaceExec
+          })
+        : undefined;
     const resultPackage = completedResultPackage({
       lease,
       codex,
       workspace,
+      patchArtifact: patchCapture?.artifact,
+      patchWarnings: patchCapture?.warnings ?? [],
       startedAt: codexStartedAt,
       completedAt,
       identityVisibility: configuration.policy?.privacy.identityVisibility ?? "anonymous",
@@ -388,6 +402,8 @@ function completedResultPackage(input: {
   readonly lease: RunnerLeaseView;
   readonly codex: CodexExecResult;
   readonly workspace: WorkspaceCheckout;
+  readonly patchArtifact?: ResultPackage["patchArtifact"];
+  readonly patchWarnings: readonly string[];
   readonly startedAt: string;
   readonly completedAt: string;
   readonly identityVisibility: ResultPackage["volunteerVisibility"];
@@ -415,17 +431,29 @@ function completedResultPackage(input: {
     structuredOutput,
     commandSummaries: [
       {
-        command: "codex exec --json --ephemeral --sandbox read-only",
+        command: `codex exec --json --ephemeral --sandbox ${input.lease.task.permissions.sandbox}`,
         exitCode: input.codex.exitCode,
         durationMs: Math.max(0, Date.parse(input.completedAt) - Date.parse(input.startedAt)),
         summary: `Codex emitted ${input.codex.events.length} JSON event(s).`
       }
     ],
-    artifacts: [],
+    artifacts:
+      input.patchArtifact === undefined
+        ? []
+        : [
+            {
+              kind: "patch",
+              storageKey: `results/${input.lease.lease.runId}/patch.diff`,
+              sha256: input.patchArtifact.sha256,
+              byteLength: input.patchArtifact.byteLength,
+              mediaType: "text/x-diff"
+            }
+          ],
+    patchArtifact: input.patchArtifact,
     warnings:
       input.codex.structuredOutput?.json !== undefined && structuredOutput === undefined
-        ? ["Structured output was not a JSON object and was omitted."]
-        : []
+        ? ["Structured output was not a JSON object and was omitted.", ...input.patchWarnings]
+        : [...input.patchWarnings]
   }));
 }
 
@@ -462,7 +490,7 @@ function baseResultPackage(input: {
     runStatus: "failed",
     taskSnapshotHash: input.lease.lease.taskSnapshotHash,
     promptHash: contentHash(input.lease.task.prompt),
-    sandbox: "read-only" as const,
+    sandbox: input.lease.task.permissions.sandbox,
     startedAt: input.startedAt,
     completedAt: input.completedAt,
     resultVisibility: input.lease.task.reporting.visibility,
@@ -489,6 +517,24 @@ function errorResult(error: unknown): ResultPackage["error"] {
 }
 
 function buildCodexPrompt(task: TaskRequest): string {
+  if (task.type === "patch_proposal" && task.permissions.allowPatches) {
+    return [
+      "You are running an OSS Capacity patch proposal task.",
+      "You may edit files in the local workspace to prepare a patch proposal.",
+      "Do not create commits, push branches, open pull requests, post publicly, or access credentials.",
+      "The maintainer will review the captured diff before any repository write happens.",
+      "",
+      `Task: ${task.title}`,
+      task.description === undefined ? undefined : `Description: ${task.description}`,
+      `Repository: ${task.repository.fullName}`,
+      task.target.ref === undefined ? undefined : `Target ref: ${task.target.ref}`,
+      "",
+      task.prompt
+    ]
+      .filter((line): line is string => line !== undefined)
+      .join("\n");
+  }
+
   return [
     "You are running a read-only OSS Capacity task.",
     "Do not edit files, create commits, push branches, open pull requests, or post publicly.",
@@ -519,6 +565,33 @@ function contentHash(value: string): string {
 
 function createEntityId(prefix: string): string {
   return `${prefix}-${randomUUID()}`;
+}
+
+function codexSandboxMode(sandbox: TaskRequest["permissions"]["sandbox"]): CodexExecSandboxMode {
+  if (sandbox === "read-only" || sandbox === "workspace-write") {
+    return sandbox;
+  }
+
+  throw new Error("Runner does not support danger-full-access Codex execution");
+}
+
+async function defaultWorkspaceExec(
+  file: string,
+  args: readonly string[],
+  options?: { readonly cwd?: string }
+): ReturnType<WorkspaceExec> {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const execFileAsync = promisify(execFile);
+  const result = await execFileAsync(file, [...args], {
+    cwd: options?.cwd,
+    maxBuffer: 10 * 1024 * 1024
+  });
+
+  return {
+    stdout: result.stdout,
+    stderr: result.stderr
+  };
 }
 
 function resetsSoon(resetsAt: string | undefined, minutes: number): boolean {

@@ -41,7 +41,7 @@ Open `http://localhost:3000`, sign in with GitHub, and open the dashboard.
    - `Patches`: unchecked
    - `Public posting`: `maintainer only`
    - `Result visibility`: `maintainer only`
-3. Enter a small analysis or triage prompt. Private-beta safety linting rejects prompts that ask Codex to post publicly, write patches, run shell commands or scripts, use network access, request credentials, or inspect volunteer-local secret paths.
+3. Enter a small analysis or triage prompt. Private-beta safety linting rejects prompts that ask Codex to post publicly, write patches for non-patch tasks, run shell commands or scripts, use network access, request credentials, or inspect volunteer-local secret paths.
 4. Keep or edit the output schema as a JSON object. Small tasks are capped at 4,000 prompt characters, 6,000 serialized output-schema characters, and 3 runs.
 5. Click `Save and activate`.
 
@@ -59,6 +59,16 @@ Open `http://localhost:3000`, sign in with GitHub, and open the dashboard.
 10. In `Setup tokens`, create a token and copy the displayed one-time token.
 
 This demo intentionally skips leasing when `Review before upload` is enabled. The future local review-before-upload workflow is out of scope for this demo.
+
+## Patch Proposal Variant
+
+Patch proposals are opt-in and remain maintainer-reviewed. To request one:
+
+1. Set task `Type` to `patch proposal`; the form selects `workspace-write` sandbox and `Patches` automatically.
+2. Keep `Network` unchecked, `Public posting` as `maintainer only`, and `Result visibility` as `maintainer only`.
+3. The volunteer policy and project subscription must both allow `patch proposal`, `workspace-write`, and patches before the broker leases the task.
+4. The runner captures a bounded, redacted unified diff after Codex exits. It does not upload the worktree, local credentials, or raw Codex auth material.
+5. The maintainer reviews the diff in the result detail page and explicitly approves or rejects it. Approval records an audit event, but does not publish a branch or pull request.
 
 ## Runner Script
 
@@ -83,14 +93,14 @@ Expected `run-once` output:
 - `lease.taskRequestId` matches the activated task.
 - `capacity.ok` is `true`.
 
-The runner invokes Codex with `codex exec --json --ephemeral --sandbox read-only` and disables shell environment inheritance for the Codex child process.
+The runner invokes Codex with `codex exec --json --ephemeral --sandbox read-only` for read-only tasks. Patch proposal tasks that pass broker policy gates use `--sandbox workspace-write`. Both modes disable shell environment inheritance for the Codex child process.
 
 ## Maintainer Inbox Check
 
 Return to the dashboard and confirm:
 
 - The inbox contains a new result for the activated task.
-- The result detail page shows the structured output and command summary.
+- The result detail page shows the structured output and command summary. Patch proposal results also show the captured diff, changed files, patch hash, and approve/reject controls.
 - No GitHub issue comment, pull request, branch, or public post was created by the runner.
 - Audit panels show scoped task, lease, run, setup-token, and runner-revocation events without runner auth hashes or volunteer Codex credentials.
 
@@ -104,7 +114,7 @@ Maintainers can promote a redacted inbox result from the result detail page afte
 4. Click `Preview` and inspect the exact repository, target, body, attribution, source metadata, and redaction state.
 5. Click `Post to GitHub` only if the preview is ready to publish.
 
-Promotion is always maintainer-initiated and uses the verified GitHub App installation token. Branch and pull request promotion is visible as a disabled future target until patch artifacts and the Task 7.2 approval flow exist.
+Promotion is always maintainer-initiated and uses the verified GitHub App installation token. Branch and pull request promotion remains disabled in Task 7.2 even after a patch is approved; publishing an approved patch is reserved for a later, explicit GitHub write slice.
 
 ## Local Mock Verification
 

@@ -253,10 +253,42 @@ export function buildGitHubPromotionPreview(
   } satisfies GitHubPromotionSourceMetadata;
 
   if (target.kind === "patch_pull_request") {
+    const patch = resultPackage.patchArtifact;
+    const disabledReason =
+      patch === undefined
+        ? target.disabledReason
+        : patch.approvalStatus !== "approved"
+          ? "Patch pull request promotion requires explicit maintainer patch approval first."
+          : "Patch artifact was approved, but branch and pull request publishing remains disabled for this Task 7.2 slice.";
+
     return {
       targetKind: target.kind,
       targetRepository: input.repositoryFullName,
-      body: "",
+      body:
+        patch === undefined
+          ? ""
+          : truncateMarkdown(
+              [
+                `## OSS Capacity patch proposal: ${redactSensitiveText(input.task.title)}`,
+                "",
+                attribution,
+                "",
+                "### Patch",
+                "",
+                `- Base commit: \`${patch.baseCommitSha ?? "not reported"}\``,
+                `- Diff SHA-256: \`${patch.sha256}\``,
+                `- Files changed: \`${patch.fileCount}\``,
+                `- Approval status: \`${patch.approvalStatus}\``,
+                "",
+                "### Diff",
+                "",
+                "```diff",
+                patch.diff,
+                "```",
+                "",
+                "_Patch redaction was applied before this preview was generated._"
+              ].join("\n")
+            ),
       attributionMode: input.attributionMode,
       attributionText: attribution,
       source,
@@ -264,7 +296,7 @@ export function buildGitHubPromotionPreview(
         applied: true,
         source: "stored_result_package_and_promotion_builder"
       },
-      disabledReason: target.disabledReason
+      disabledReason
     };
   }
 
