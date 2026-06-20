@@ -1,0 +1,23 @@
+[package]
+name = "oss-capacity-desktop"
+version = "0.0.0"
+description = "Local desktop shell for the OSS Capacity runner"
+authors = ["OSS Capacity"]
+edition = "2024"
+
+[lib]
+name = "oss_capacity_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.4.1", features = [] }
+
+[dependencies]
+libc = "0.2.186"
+regex = "1.11.3"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+tauri = { version = "2.8.5", features = [] }
+
+[dev-dependencies]
+tempfile = "3.23.0"

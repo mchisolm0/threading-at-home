@@ -1,0 +1,295 @@
+:root {
+  color: #17201a;
+  background: #eef1ec;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  min-height: 40px;
+  border: 1px solid #1e3a2f;
+  border-radius: 6px;
+  padding: 0 14px;
+  background: #1e3a2f;
+  color: #ffffff;
+  cursor: pointer;
+}
+
+button:disabled {
+  border-color: #bcc5be;
+  background: #dce2dd;
+  color: #68736c;
+  cursor: not-allowed;
+}
+
+.shell {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.status-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  padding: 28px;
+  background: #17201a;
+  color: #f5f7f2;
+}
+
+.eyebrow {
+  margin: 0 0 2px;
+  color: #9bb7ab;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  margin-bottom: 0;
+  font-size: 2.4rem;
+}
+
+h2 {
+  margin-bottom: 8px;
+  font-size: 1.45rem;
+}
+
+h3 {
+  margin-bottom: 12px;
+  font-size: 1rem;
+}
+
+nav {
+  display: grid;
+  gap: 8px;
+}
+
+nav a {
+  border-radius: 6px;
+  padding: 10px 12px;
+  color: #f5f7f2;
+  text-decoration: none;
+}
+
+nav a:hover {
+  background: #24342b;
+}
+
+.trust {
+  margin-top: auto;
+  border-top: 1px solid #3c4b41;
+  padding-top: 20px;
+}
+
+.trust ul,
+.reason-list {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.trust li + li,
+.reason-list li + li {
+  margin-top: 8px;
+}
+
+.workspace {
+  display: grid;
+  align-content: start;
+  gap: 22px;
+  padding: 28px;
+}
+
+.topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  border-bottom: 1px solid #cbd3cb;
+  padding-bottom: 20px;
+}
+
+.topbar p {
+  margin-bottom: 0;
+  color: #59635c;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  border-radius: 999px;
+  padding: 0 10px;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.badge.good {
+  background: #cfe7d8;
+  color: #124022;
+}
+
+.badge.warn {
+  background: #ffe1a8;
+  color: #573500;
+}
+
+.badge.neutral {
+  background: #d7dfec;
+  color: #1d365a;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.panel,
+.log-entry {
+  border: 1px solid #cbd3cb;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 18px;
+}
+
+.metric {
+  margin-bottom: 18px;
+  color: #1e3a2f;
+  font-size: 1.8rem;
+  font-weight: 800;
+}
+
+dl {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 16px;
+}
+
+dl div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+dt {
+  color: #637068;
+}
+
+dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.command-panel p,
+.section-heading p,
+.empty {
+  color: #59635c;
+}
+
+code {
+  display: block;
+  overflow-x: auto;
+  border-radius: 6px;
+  padding: 12px;
+  background: #18211c;
+  color: #e7f2ea;
+}
+
+.logs {
+  display: grid;
+  gap: 14px;
+}
+
+.section-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.section-heading p {
+  margin-bottom: 0;
+}
+
+.log-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  color: #59635c;
+}
+
+pre {
+  max-height: 280px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.notice {
+  border: 1px solid #e5b557;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fff6df;
+}
+
+.warn-text {
+  color: #573500;
+}
+
+@media (max-width: 860px) {
+  .shell,
+  .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .status-menu {
+    min-height: auto;
+  }
+
+  .topbar,
+  .section-heading {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .actions {
+    justify-content: flex-start;
+  }
+}
