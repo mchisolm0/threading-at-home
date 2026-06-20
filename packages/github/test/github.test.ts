@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
 import {
+  buildGitHubIssueCommentRequest,
+  buildGitHubIssueRequest,
   createGitHubAppJwt,
   hasRepositoryMaintainerPermission,
   normalizeRepositoryFullName,
+  parseGitHubCreatedIssue,
+  parseGitHubCreatedIssueComment,
   parseGitHubInstallationWebhook,
   parseGitHubRepositoryPermission,
   signGitHubWebhookPayload,
@@ -169,6 +173,56 @@ describe("GitHub App helpers", () => {
       permission: "write",
       roleName: "maintain",
       userLogin: undefined
+    });
+  });
+
+  it("builds issue comment and issue creation requests", () => {
+    expect(
+      buildGitHubIssueCommentRequest({
+        repositoryFullName: "openai/codex",
+        issueNumber: 123,
+        body: "Preview body"
+      })
+    ).toEqual({
+      method: "POST",
+      url: "https://api.github.com/repos/openai/codex/issues/123/comments",
+      body: JSON.stringify({ body: "Preview body" })
+    });
+
+    expect(
+      buildGitHubIssueRequest({
+        repositoryFullName: "openai/codex",
+        title: "Result summary",
+        body: "Preview body"
+      })
+    ).toEqual({
+      method: "POST",
+      url: "https://api.github.com/repos/openai/codex/issues",
+      body: JSON.stringify({ title: "Result summary", body: "Preview body" })
+    });
+  });
+
+  it("parses created issue and comment responses", () => {
+    expect(
+      parseGitHubCreatedIssueComment({
+        id: 10,
+        html_url: "https://github.com/openai/codex/issues/1#issuecomment-10"
+      })
+    ).toEqual({
+      githubId: "10",
+      url: "https://github.com/openai/codex/issues/1#issuecomment-10"
+    });
+
+    expect(
+      parseGitHubCreatedIssue({
+        id: "20",
+        number: 7,
+        html_url: "https://github.com/openai/codex/issues/7"
+      })
+    ).toEqual({
+      githubId: "20",
+      number: 7,
+      url: "https://github.com/openai/codex/issues/7"
     });
   });
 

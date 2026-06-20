@@ -299,6 +299,33 @@ export default defineSchema({
     .index("by_project", ["projectId"])
     .index("by_project_completed_at", ["projectId", "completedAt"]),
 
+  resultPromotions: defineTable({
+    promotionId: v.string(),
+    resultPackageId: v.string(),
+    projectId: v.string(),
+    taskRequestId: v.string(),
+    runId: v.string(),
+    actorUserId: v.string(),
+    targetKind: v.string(),
+    targetRepositoryFullName: v.string(),
+    targetIssueNumber: v.optional(v.number()),
+    targetIssueTitle: v.optional(v.string()),
+    attributionMode: v.string(),
+    previewTitle: v.optional(v.string()),
+    previewBody: v.string(),
+    status: v.string(),
+    targetUrl: v.optional(v.string()),
+    targetGitHubId: v.optional(v.string()),
+    errorSummary: v.optional(v.string()),
+    createdAt: v.string(),
+    updatedAt: v.string(),
+    postedAt: v.optional(v.string())
+  })
+    .index("by_promotion_id", ["promotionId"])
+    .index("by_result_package", ["resultPackageId"])
+    .index("by_project", ["projectId"])
+    .index("by_actor", ["actorUserId"]),
+
   auditEvents: defineTable({
     eventType: v.string(),
     entityType: v.string(),

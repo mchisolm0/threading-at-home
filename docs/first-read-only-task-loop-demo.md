@@ -9,7 +9,7 @@ This demo verifies the Task 6.1 MVP path:
 5. Codex runs locally on the volunteer machine in read-only mode.
 6. The result appears in the maintainer inbox.
 
-The runner never uploads volunteer Codex credentials to Convex. Convex stores task, lease, runner, and result state only. This demo does not post to GitHub, create branches, open pull requests, or write public comments.
+The runner never uploads volunteer Codex credentials to Convex. Convex stores task, lease, runner, and result state only. The runner does not post to GitHub, create branches, open pull requests, or write public comments.
 
 ## Required Live Services
 
@@ -91,8 +91,20 @@ Return to the dashboard and confirm:
 
 - The inbox contains a new result for the activated task.
 - The result detail page shows the structured output and command summary.
-- No GitHub issue comment, pull request, branch, or public post was created by this flow.
+- No GitHub issue comment, pull request, branch, or public post was created by the runner.
 - Audit panels show scoped task, lease, run, setup-token, and runner-revocation events without runner auth hashes or volunteer Codex credentials.
+
+## Optional Manual GitHub Promotion
+
+Maintainers can promote a redacted inbox result from the result detail page after configuring the GitHub App with Issues write permission.
+
+1. Open a result detail page.
+2. Choose `Issue comment` with a target issue number, or `New issue` with a title.
+3. Choose attribution as `OSS Capacity only` or `OSS Capacity and run metadata`.
+4. Click `Preview` and inspect the exact repository, target, body, attribution, source metadata, and redaction state.
+5. Click `Post to GitHub` only if the preview is ready to publish.
+
+Promotion is always maintainer-initiated and uses the verified GitHub App installation token. Branch and pull request promotion is visible as a disabled future target until patch artifacts and the Task 7.2 approval flow exist.
 
 ## Local Mock Verification
 

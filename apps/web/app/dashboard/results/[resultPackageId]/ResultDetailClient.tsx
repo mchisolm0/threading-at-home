@@ -1,10 +1,16 @@
 "use client";
 
-import type { JsonValue } from "@oss-capacity/core";
-import { useQuery } from "convex/react";
+import type {
+  GitHubPromotionAttributionMode,
+  GitHubPromotionPreview,
+  GitHubPromotionTarget,
+  JsonValue
+} from "@oss-capacity/core";
+import { useAction, useQuery } from "convex/react";
 import Link from "next/link";
+import { useState } from "react";
 
-import { convexApi } from "../../../convexApi";
+import { convexApi, type PromotionResultView } from "../../../convexApi";
 import {
   formatDurationMs,
   formatLabel,
@@ -62,6 +68,289 @@ function StructuredOutput({
         </div>
       ))}
     </dl>
+  );
+}
+
+type PreviewRequest = {
+  readonly resultPackageId: string;
+  readonly target: GitHubPromotionTarget;
+  readonly attributionMode: GitHubPromotionAttributionMode;
+};
+
+function previewTargetLabel(preview: GitHubPromotionPreview): string {
+  if (preview.targetKind === "issue_comment") {
+    return `${preview.targetRepository} issue #${preview.targetIssueNumber}`;
+  }
+
+  if (preview.targetKind === "new_issue") {
+    return `${preview.targetRepository} new issue`;
+  }
+
+  return `${preview.targetRepository} patch pull request`;
+}
+
+function PromotionPanel({
+  resultPackageId,
+  defaultIssueTitle
+}: {
+  readonly resultPackageId: string;
+  readonly defaultIssueTitle: string;
+}) {
+  const promoteResultToGitHub = useAction(convexApi.github.promoteResultToGitHub);
+  const [targetKind, setTargetKind] =
+    useState<GitHubPromotionTarget["kind"]>("issue_comment");
+  const [issueNumber, setIssueNumber] = useState("");
+  const [issueTitle, setIssueTitle] = useState(defaultIssueTitle);
+  const [attributionMode, setAttributionMode] =
+    useState<GitHubPromotionAttributionMode>("app");
+  const [previewRequest, setPreviewRequest] = useState<PreviewRequest | null>(null);
+  const [isPosting, setIsPosting] = useState(false);
+  const [promotionResult, setPromotionResult] =
+    useState<PromotionResultView | null>(null);
+  const [promotionError, setPromotionError] = useState<string | null>(null);
+  const preview = useQuery(
+    convexApi.github.previewResultPromotion,
+    previewRequest ?? "skip"
+  );
+
+  function clearPreview() {
+    setPreviewRequest(null);
+    setPromotionResult(null);
+    setPromotionError(null);
+  }
+
+  function currentTarget(): GitHubPromotionTarget | null {
+    if (targetKind === "issue_comment") {
+      const parsedIssueNumber = Number(issueNumber);
+
+      if (!Number.isInteger(parsedIssueNumber) || parsedIssueNumber < 1) {
+        return null;
+      }
+
+      return {
+        kind: "issue_comment",
+        issueNumber: parsedIssueNumber
+      };
+    }
+
+    if (targetKind === "new_issue") {
+      const title = issueTitle.trim();
+
+      if (title.length === 0) {
+        return null;
+      }
+
+      return {
+        kind: "new_issue",
+        title
+      };
+    }
+
+    return {
+      kind: "patch_pull_request",
+      disabledReason: "Patch pull request promotion is reserved for Task 7.2."
+    };
+  }
+
+  const target = currentTarget();
+  const canPreview = target !== null && target.kind !== "patch_pull_request";
+  const canPost =
+    preview !== undefined &&
+    preview !== null &&
+    preview.disabledReason === undefined &&
+    previewRequest !== null &&
+    promotionResult?.promotion.status !== "posted";
+
+  async function postPromotion() {
+    if (!canPost || previewRequest === null || preview === undefined) {
+      return;
+    }
+
+    setIsPosting(true);
+    setPromotionError(null);
+
+    try {
+      const result = await promoteResultToGitHub({
+        ...previewRequest,
+        confirmedPreviewTitle: preview.title,
+        confirmedPreviewBody: preview.body
+      });
+
+      setPromotionResult(result);
+      if (result.promotion.status === "failed") {
+        setPromotionError(result.promotion.errorSummary ?? "GitHub promotion failed.");
+      }
+    } catch (error) {
+      setPromotionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsPosting(false);
+    }
+  }
+
+  return (
+    <div className="panel promotion-panel">
+      <div className="panel-heading">
+        <p className="eyebrow">GitHub</p>
+        <h2>Manual promotion</h2>
+      </div>
+
+      <div className="promotion-controls">
+        <div className="field">
+          <label htmlFor="promotionTargetKind">Target</label>
+          <select
+            id="promotionTargetKind"
+            value={targetKind}
+            onChange={(event) => {
+              setTargetKind(event.target.value as GitHubPromotionTarget["kind"]);
+              clearPreview();
+            }}
+          >
+            <option value="issue_comment">Issue comment</option>
+            <option value="new_issue">New issue</option>
+            <option value="patch_pull_request">Branch or pull request later</option>
+          </select>
+        </div>
+
+        {targetKind === "issue_comment" ? (
+          <div className="field">
+            <label htmlFor="promotionIssueNumber">Issue number</label>
+            <input
+              id="promotionIssueNumber"
+              inputMode="numeric"
+              min="1"
+              placeholder="123"
+              type="number"
+              value={issueNumber}
+              onChange={(event) => {
+                setIssueNumber(event.target.value);
+                clearPreview();
+              }}
+            />
+          </div>
+        ) : null}
+
+        {targetKind === "new_issue" ? (
+          <div className="field">
+            <label htmlFor="promotionIssueTitle">Issue title</label>
+            <input
+              id="promotionIssueTitle"
+              value={issueTitle}
+              onChange={(event) => {
+                setIssueTitle(event.target.value);
+                clearPreview();
+              }}
+            />
+          </div>
+        ) : null}
+
+        <div className="field">
+          <label htmlFor="promotionAttribution">Attribution</label>
+          <select
+            id="promotionAttribution"
+            value={attributionMode}
+            onChange={(event) => {
+              setAttributionMode(
+                event.target.value as GitHubPromotionAttributionMode
+              );
+              clearPreview();
+            }}
+          >
+            <option value="app">OSS Capacity only</option>
+            <option value="app_with_anonymous_run">OSS Capacity and run metadata</option>
+          </select>
+        </div>
+      </div>
+
+      {targetKind === "patch_pull_request" ? (
+        <p className="status-message">
+          Branch and pull request promotion is reserved for patch artifacts.
+        </p>
+      ) : null}
+
+      <div className="form-actions">
+        <button
+          type="button"
+          disabled={!canPreview}
+          onClick={() => {
+            if (target === null || target.kind === "patch_pull_request") {
+              return;
+            }
+
+            setPreviewRequest({
+              resultPackageId,
+              target,
+              attributionMode
+            });
+            setPromotionResult(null);
+            setPromotionError(null);
+          }}
+        >
+          Preview
+        </button>
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={!canPost || isPosting}
+          onClick={() => void postPromotion()}
+        >
+          {isPosting ? "Posting..." : "Post to GitHub"}
+        </button>
+      </div>
+
+      {previewRequest !== null && preview === undefined ? (
+        <span className="loading-copy">Building preview...</span>
+      ) : null}
+
+      {preview !== undefined && preview !== null ? (
+        <div className="promotion-preview">
+          <dl className="detail-list">
+            <div>
+              <dt>Target</dt>
+              <dd>{previewTargetLabel(preview)}</dd>
+            </div>
+            <div>
+              <dt>Attribution</dt>
+              <dd>{preview.attributionText}</dd>
+            </div>
+            <div>
+              <dt>Source</dt>
+              <dd>
+                {preview.source.resultPackageId} from run {preview.source.runId}
+              </dd>
+            </div>
+            <div>
+              <dt>Redaction</dt>
+              <dd>{preview.redaction.applied ? "applied" : "not applied"}</dd>
+            </div>
+          </dl>
+
+          {preview.title === undefined ? null : (
+            <div className="field">
+              <span className="field-label">Title</span>
+              <pre className="prompt-block">{preview.title}</pre>
+            </div>
+          )}
+
+          <div className="field">
+            <span className="field-label">Body</span>
+            <pre className="json-block">{preview.body}</pre>
+          </div>
+        </div>
+      ) : null}
+
+      {promotionResult?.promotion.status === "posted" ? (
+        <p className="status-message">
+          Posted:{" "}
+          <a href={promotionResult.promotion.targetUrl} rel="noreferrer" target="_blank">
+            {promotionResult.promotion.targetUrl}
+          </a>
+        </p>
+      ) : null}
+
+      {promotionError === null ? null : (
+        <p className="field-error">{promotionError}</p>
+      )}
+    </div>
   );
 }
 
@@ -228,6 +517,11 @@ export function ResultDetailClient({
           </dl>
         </div>
       </div>
+
+      <PromotionPanel
+        resultPackageId={resultPackage.resultPackageId}
+        defaultIssueTitle={`OSS Capacity result: ${task.title}`}
+      />
 
       <div className="detail-grid">
         <div className="panel">

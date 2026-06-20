@@ -36,8 +36,11 @@ Subscribe to these webhook events:
 Set repository permissions to:
 
 - Metadata: read-only
+- Issues: read and write
 
 The registration flow uses the installation access token to call GitHub's repository metadata endpoint and repository collaborator permission endpoint. It accepts repository owners, `admin`, and `maintain` permissions.
+
+Manual result promotion uses the same verified installation token flow after a maintainer previews and confirms the exact public text. Issue write permission is required to create issue comments and new issues. The runner never posts to GitHub, and Convex does not store GitHub installation tokens.
 
 Useful GitHub references:
 
@@ -91,3 +94,5 @@ NEXT_PUBLIC_GITHUB_APP_INSTALL_URL=https://github.com/apps/<app-slug>/installati
 The repository includes mocked tests for webhook signature verification, installation payload parsing, repository permission decisions, and repository full-name validation.
 
 Live GitHub verification requires real OAuth credentials, a GitHub App private key, an installation, and webhook delivery. Without those secrets, run the local checks and use the dashboard only after manually configuring the Convex environment above.
+
+Manual result promotion additionally requires the GitHub App installation to include Issues write permission for the target repository. The result detail page supports issue comments and new issues for the read-only MVP. Branch and pull request promotion remains disabled until patch artifacts and maintainer patch approval are implemented.
