@@ -1,12 +1,26 @@
 import { getAuthUserId } from "@convex-dev/auth/server";
 import {
+  buildGitHubIssueCommentRequest,
+  buildGitHubIssueRequest,
   createGitHubAppJwt,
   hasRepositoryMaintainerPermission,
   normalizeRepositoryFullName,
+  parseGitHubCreatedIssue,
+  parseGitHubCreatedIssueComment,
   parseGitHubRepositoryPermission,
   repositoryOwnerAndName,
   type GitHubInstallationSync
 } from "@oss-capacity/github";
+import {
+  buildGitHubPromotionPreview,
+  normalizeGitHubPromotionTarget,
+  parseResultPackage,
+  parseTaskRequest,
+  type GitHubPromotionPreview,
+  type GitHubPromotionTarget,
+  type ResultPackage,
+  type TaskRequest
+} from "@oss-capacity/core";
 import {
   actionGeneric,
   internalMutationGeneric,
@@ -88,6 +102,40 @@ type GitHubInstallationTokenResponse = {
 type GitHubUserApiResponse = {
   readonly login?: unknown;
 };
+type PromotionContext = {
+  readonly actorUserId: string;
+  readonly actorGithubUserId: string;
+  readonly project: ProjectView;
+  readonly installationId: string;
+  readonly task: TaskRequest;
+  readonly resultPackage: ResultPackage;
+  readonly visibleRunnerId?: string;
+};
+type PromotionRecordView = {
+  readonly promotionId: string;
+  readonly resultPackageId: string;
+  readonly projectId: string;
+  readonly taskRequestId: string;
+  readonly runId: string;
+  readonly targetKind: string;
+  readonly targetRepositoryFullName: string;
+  readonly targetIssueNumber?: number;
+  readonly targetIssueTitle?: string;
+  readonly attributionMode: string;
+  readonly previewTitle?: string;
+  readonly previewBody: string;
+  readonly status: string;
+  readonly targetUrl?: string;
+  readonly targetGitHubId?: string;
+  readonly errorSummary?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly postedAt?: string;
+};
+type PromotionResult = {
+  readonly promotion: PromotionRecordView;
+  readonly preview: GitHubPromotionPreview;
+};
 
 const query = queryGeneric;
 const internalQuery = internalQueryGeneric;
@@ -109,6 +157,42 @@ const registerVerifiedProjectRef = makeFunctionReference<
   },
   ProjectView
 >("github:registerVerifiedProject");
+const promotionContextRef = makeFunctionReference<
+  "query",
+  { resultPackageId: string },
+  PromotionContext
+>("github:promotionContext");
+const recordPromotionAttemptRef = makeFunctionReference<
+  "mutation",
+  {
+    preview: GitHubPromotionPreview;
+    actorUserId: string;
+    attributionMode: string;
+    target: GitHubPromotionTarget;
+    now: string;
+  },
+  PromotionRecordView
+>("github:recordPromotionAttempt");
+const recordPromotionPostedRef = makeFunctionReference<
+  "mutation",
+  {
+    promotionId: string;
+    targetUrl: string;
+    targetGitHubId: string;
+    targetIssueNumber?: number;
+    now: string;
+  },
+  PromotionRecordView
+>("github:recordPromotionPosted");
+const recordPromotionFailedRef = makeFunctionReference<
+  "mutation",
+  {
+    promotionId: string;
+    errorSummary: string;
+    now: string;
+  },
+  PromotionRecordView
+>("github:recordPromotionFailed");
 
 type ProjectView = {
   readonly projectId: string;
@@ -219,6 +303,51 @@ function projectView(project: ProjectDoc): ProjectView {
   };
 }
 
+function withoutSystemFields(doc: StoredDoc): Record<string, Value> {
+  const result: Record<string, Value> = {};
+
+  for (const [key, value] of Object.entries(doc)) {
+    if (key !== "_id" && key !== "_creationTime") {
+      result[key] = value;
+    }
+  }
+
+  return result;
+}
+
+function promotionRecordView(record: StoredDoc): PromotionRecordView {
+  return {
+    promotionId: String(record.promotionId),
+    resultPackageId: String(record.resultPackageId),
+    projectId: String(record.projectId),
+    taskRequestId: String(record.taskRequestId),
+    runId: String(record.runId),
+    targetKind: String(record.targetKind),
+    targetRepositoryFullName: String(record.targetRepositoryFullName),
+    targetIssueNumber:
+      typeof record.targetIssueNumber === "number"
+        ? record.targetIssueNumber
+        : undefined,
+    targetIssueTitle:
+      typeof record.targetIssueTitle === "string"
+        ? record.targetIssueTitle
+        : undefined,
+    attributionMode: String(record.attributionMode),
+    previewTitle:
+      typeof record.previewTitle === "string" ? record.previewTitle : undefined,
+    previewBody: String(record.previewBody),
+    status: String(record.status),
+    targetUrl: typeof record.targetUrl === "string" ? record.targetUrl : undefined,
+    targetGitHubId:
+      typeof record.targetGitHubId === "string" ? record.targetGitHubId : undefined,
+    errorSummary:
+      typeof record.errorSummary === "string" ? record.errorSummary : undefined,
+    createdAt: String(record.createdAt),
+    updatedAt: String(record.updatedAt),
+    postedAt: typeof record.postedAt === "string" ? record.postedAt : undefined
+  };
+}
+
 async function requireAuthenticatedGithubUser(
   ctx: QueryCtx | MutationCtx
 ): Promise<AuthenticatedGithubUser> {
@@ -280,6 +409,38 @@ async function projectById(
     .unique()) as ProjectDoc | null;
 }
 
+async function taskById(
+  ctx: QueryCtx | MutationCtx,
+  taskRequestId: string
+): Promise<StoredDoc | null> {
+  return (await ctx.db
+    .query("taskRequests")
+    .withIndex("by_id", (q) => q.eq("id", taskRequestId))
+    .unique()) as StoredDoc | null;
+}
+
+async function resultPackageById(
+  ctx: QueryCtx | MutationCtx,
+  resultPackageId: string
+): Promise<StoredDoc | null> {
+  return (await ctx.db
+    .query("resultPackages")
+    .withIndex("by_result_package_id", (q) =>
+      q.eq("resultPackageId", resultPackageId)
+    )
+    .unique()) as StoredDoc | null;
+}
+
+async function promotionById(
+  ctx: QueryCtx | MutationCtx,
+  promotionId: string
+): Promise<StoredDoc | null> {
+  return (await ctx.db
+    .query("resultPromotions")
+    .withIndex("by_promotion_id", (q) => q.eq("promotionId", promotionId))
+    .unique()) as StoredDoc | null;
+}
+
 async function insertAuditEvent(
   ctx: MutationCtx,
   event: {
@@ -288,6 +449,8 @@ async function insertAuditEvent(
     readonly entityId: string;
     readonly occurredAt: string;
     readonly projectId?: string;
+    readonly taskRequestId?: string;
+    readonly runId?: string;
     readonly actorUserId?: string;
     readonly metadata?: unknown;
   }
@@ -401,6 +564,72 @@ async function verifyRepositoryPermission(input: {
   return {
     canonicalFullName: normalizeRepositoryFullName(canonicalFullName),
     defaultBranch: optionalString(repositoryResponse.default_branch)
+  };
+}
+
+async function requirePromotionContext(
+  ctx: QueryCtx,
+  resultPackageId: string
+): Promise<PromotionContext> {
+  const actor = await requireAuthenticatedGithubUser(ctx);
+  const resultDoc = await resultPackageById(ctx, resultPackageId);
+
+  if (resultDoc === null) {
+    throw new Error(`Result package not found: ${resultPackageId}`);
+  }
+
+  const resultPackage = parseResultPackage(withoutSystemFields(resultDoc));
+  const [project, taskDoc] = await Promise.all([
+    projectById(ctx, resultPackage.projectId),
+    taskById(ctx, resultPackage.taskRequestId)
+  ]);
+
+  if (
+    project === null ||
+    project.createdByUserId !== actor.userId ||
+    project.status !== "verified"
+  ) {
+    throw new Error("Only the verified project maintainer can promote this result");
+  }
+
+  if (typeof project.githubInstallationId !== "string") {
+    throw new Error("Verified project is missing a GitHub App installation");
+  }
+
+  const installation = await installationById(ctx, project.githubInstallationId);
+
+  if (
+    installation === null ||
+    installation.status !== "active" ||
+    !hasRepository(installation, project.repository.fullName)
+  ) {
+    throw new Error("GitHub App installation is not active for this project");
+  }
+
+  if (taskDoc === null) {
+    throw new Error(`Task request not found: ${resultPackage.taskRequestId}`);
+  }
+
+  const task = parseTaskRequest(withoutSystemFields(taskDoc));
+
+  if (
+    task.createdByUserId !== actor.userId ||
+    task.projectId !== resultPackage.projectId
+  ) {
+    throw new Error("Only the task maintainer can promote this result");
+  }
+
+  return {
+    actorUserId: actor.userId,
+    actorGithubUserId: actor.githubUserId,
+    project: projectView(project),
+    installationId: project.githubInstallationId,
+    task,
+    resultPackage,
+    visibleRunnerId:
+      resultPackage.volunteerVisibility === "anonymous"
+        ? undefined
+        : resultPackage.runnerId
   };
 }
 
@@ -578,6 +807,313 @@ export const registerVerifiedProject = internalMutation({
       ...projectDocument,
       createdAt: project?.createdAt ?? now
     };
+  }
+});
+
+const promotionTargetArg = v.union(
+  v.object({
+    kind: v.literal("issue_comment"),
+    issueNumber: v.number()
+  }),
+  v.object({
+    kind: v.literal("new_issue"),
+    title: v.string()
+  }),
+  v.object({
+    kind: v.literal("patch_pull_request"),
+    disabledReason: v.string()
+  })
+);
+const promotionAttributionArg = v.union(
+  v.literal("app"),
+  v.literal("app_with_anonymous_run")
+);
+
+export const promotionContext = internalQuery({
+  args: {
+    resultPackageId: v.string()
+  },
+  handler: async (ctx, args): Promise<PromotionContext> => {
+    return await requirePromotionContext(ctx, args.resultPackageId);
+  }
+});
+
+export const previewResultPromotion = query({
+  args: {
+    resultPackageId: v.string(),
+    target: promotionTargetArg,
+    attributionMode: promotionAttributionArg
+  },
+  handler: async (ctx, args): Promise<GitHubPromotionPreview> => {
+    const context = await requirePromotionContext(ctx, args.resultPackageId);
+
+    return buildGitHubPromotionPreview({
+      repositoryFullName: context.project.repository.fullName,
+      task: context.task,
+      resultPackage: context.resultPackage,
+      target: args.target,
+      attributionMode: args.attributionMode,
+      visibleRunnerId: context.visibleRunnerId
+    });
+  }
+});
+
+export const recordPromotionAttempt = internalMutation({
+  args: {
+    preview: v.any(),
+    actorUserId: v.string(),
+    attributionMode: v.string(),
+    target: promotionTargetArg,
+    now: v.string()
+  },
+  handler: async (ctx, args): Promise<PromotionRecordView> => {
+    const normalizedTarget = normalizeGitHubPromotionTarget(args.target);
+    const promotionId = `${args.preview.source.resultPackageId}:${Date.now()}:${Math.random()
+      .toString(36)
+      .slice(2, 10)}`;
+    const record = {
+      promotionId,
+      resultPackageId: args.preview.source.resultPackageId,
+      projectId: args.preview.source.projectId,
+      taskRequestId: args.preview.source.taskRequestId,
+      runId: args.preview.source.runId,
+      actorUserId: args.actorUserId,
+      targetKind: args.preview.targetKind,
+      targetRepositoryFullName: args.preview.targetRepository,
+      targetIssueNumber:
+        normalizedTarget.kind === "issue_comment"
+          ? normalizedTarget.issueNumber
+          : undefined,
+      targetIssueTitle:
+        normalizedTarget.kind === "new_issue" ? normalizedTarget.title : undefined,
+      attributionMode: args.attributionMode,
+      previewTitle: args.preview.title,
+      previewBody: args.preview.body,
+      status: "posting",
+      createdAt: args.now,
+      updatedAt: args.now
+    };
+
+    await ctx.db.insert("resultPromotions", toConvexDocument(record));
+    await insertAuditEvent(ctx, {
+      eventType: "result_promotion.requested",
+      entityType: "resultPromotion",
+      entityId: promotionId,
+      projectId: record.projectId,
+      taskRequestId: record.taskRequestId,
+      runId: record.runId,
+      actorUserId: args.actorUserId,
+      occurredAt: args.now,
+      metadata: {
+        resultPackageId: record.resultPackageId,
+        targetKind: record.targetKind,
+        targetRepositoryFullName: record.targetRepositoryFullName,
+        targetIssueNumber: record.targetIssueNumber,
+        targetIssueTitle: record.targetIssueTitle,
+        attributionMode: args.attributionMode
+      }
+    });
+
+    return promotionRecordView(record as unknown as StoredDoc);
+  }
+});
+
+export const recordPromotionPosted = internalMutation({
+  args: {
+    promotionId: v.string(),
+    targetUrl: v.string(),
+    targetGitHubId: v.string(),
+    targetIssueNumber: v.optional(v.number()),
+    now: v.string()
+  },
+  handler: async (ctx, args): Promise<PromotionRecordView> => {
+    const record = await promotionById(ctx, args.promotionId);
+
+    if (record === null) {
+      throw new Error(`Promotion record not found: ${args.promotionId}`);
+    }
+
+    await ctx.db.patch(record._id, {
+      status: "posted",
+      targetUrl: args.targetUrl,
+      targetGitHubId: args.targetGitHubId,
+      targetIssueNumber: args.targetIssueNumber ?? record.targetIssueNumber,
+      updatedAt: args.now,
+      postedAt: args.now
+    });
+
+    const updated = (await promotionById(ctx, args.promotionId)) as StoredDoc;
+
+    await insertAuditEvent(ctx, {
+      eventType: "result_promotion.posted",
+      entityType: "resultPromotion",
+      entityId: args.promotionId,
+      projectId: String(updated.projectId),
+      taskRequestId: String(updated.taskRequestId),
+      runId: String(updated.runId),
+      actorUserId: String(updated.actorUserId),
+      occurredAt: args.now,
+      metadata: {
+        resultPackageId: updated.resultPackageId,
+        targetKind: updated.targetKind,
+        targetRepositoryFullName: updated.targetRepositoryFullName,
+        targetUrl: args.targetUrl,
+        targetGitHubId: args.targetGitHubId
+      }
+    });
+
+    return promotionRecordView(updated);
+  }
+});
+
+export const recordPromotionFailed = internalMutation({
+  args: {
+    promotionId: v.string(),
+    errorSummary: v.string(),
+    now: v.string()
+  },
+  handler: async (ctx, args): Promise<PromotionRecordView> => {
+    const record = await promotionById(ctx, args.promotionId);
+
+    if (record === null) {
+      throw new Error(`Promotion record not found: ${args.promotionId}`);
+    }
+
+    await ctx.db.patch(record._id, {
+      status: "failed",
+      errorSummary: args.errorSummary.slice(0, 500),
+      updatedAt: args.now
+    });
+
+    const updated = (await promotionById(ctx, args.promotionId)) as StoredDoc;
+
+    await insertAuditEvent(ctx, {
+      eventType: "result_promotion.failed",
+      entityType: "resultPromotion",
+      entityId: args.promotionId,
+      projectId: String(updated.projectId),
+      taskRequestId: String(updated.taskRequestId),
+      runId: String(updated.runId),
+      actorUserId: String(updated.actorUserId),
+      occurredAt: args.now,
+      metadata: {
+        resultPackageId: updated.resultPackageId,
+        targetKind: updated.targetKind,
+        targetRepositoryFullName: updated.targetRepositoryFullName,
+        errorSummary: args.errorSummary.slice(0, 500)
+      }
+    });
+
+    return promotionRecordView(updated);
+  }
+});
+
+export const promoteResultToGitHub = actionGeneric({
+  args: {
+    resultPackageId: v.string(),
+    target: promotionTargetArg,
+    attributionMode: promotionAttributionArg,
+    confirmedPreviewTitle: v.optional(v.string()),
+    confirmedPreviewBody: v.string()
+  },
+  handler: async (ctx, args): Promise<PromotionResult> => {
+    const target = normalizeGitHubPromotionTarget(args.target);
+
+    if (target.kind === "patch_pull_request") {
+      throw new Error("Patch pull request promotion is reserved for Task 7.2");
+    }
+
+    const context = await ctx.runQuery(promotionContextRef, {
+      resultPackageId: args.resultPackageId
+    });
+    const preview = buildGitHubPromotionPreview({
+      repositoryFullName: context.project.repository.fullName,
+      task: context.task,
+      resultPackage: context.resultPackage,
+      target,
+      attributionMode: args.attributionMode,
+      visibleRunnerId: context.visibleRunnerId
+    });
+
+    if (
+      preview.body !== args.confirmedPreviewBody ||
+      preview.title !== args.confirmedPreviewTitle
+    ) {
+      throw new Error("Promotion preview changed. Refresh the preview before posting.");
+    }
+
+    const now = isoNow();
+    const attempt = await ctx.runMutation(recordPromotionAttemptRef, {
+      preview,
+      actorUserId: context.actorUserId,
+      attributionMode: args.attributionMode,
+      target,
+      now
+    });
+
+    try {
+      await verifyRepositoryPermission({
+        repositoryFullName: context.project.repository.fullName,
+        viewerGithubUserId: context.actorGithubUserId,
+        installationId: context.installationId
+      });
+      const token = await createInstallationAccessToken(context.installationId);
+      const request =
+        target.kind === "issue_comment"
+          ? buildGitHubIssueCommentRequest({
+              repositoryFullName: context.project.repository.fullName,
+              issueNumber: target.issueNumber,
+              body: preview.body
+            })
+          : buildGitHubIssueRequest({
+              repositoryFullName: context.project.repository.fullName,
+              title: target.title,
+              body: preview.body
+            });
+      const response = await requestGitHubJson<unknown>(request.url, {
+        method: request.method,
+        token,
+        body: request.body,
+        headers: {
+          "content-type": "application/json"
+        }
+      });
+      const created =
+        target.kind === "issue_comment"
+          ? {
+              ...parseGitHubCreatedIssueComment(
+                response as Parameters<typeof parseGitHubCreatedIssueComment>[0]
+              ),
+              issueNumber: attempt.targetIssueNumber
+            }
+          : (() => {
+              const issue = parseGitHubCreatedIssue(
+                response as Parameters<typeof parseGitHubCreatedIssue>[0]
+              );
+
+              return {
+                ...issue,
+                issueNumber: issue.number
+              };
+            })();
+      const posted = await ctx.runMutation(recordPromotionPostedRef, {
+        promotionId: attempt.promotionId,
+        targetUrl: created.url,
+        targetGitHubId: created.githubId,
+        targetIssueNumber: created.issueNumber,
+        now: isoNow()
+      });
+
+      return { promotion: posted, preview };
+    } catch (error) {
+      const failed = await ctx.runMutation(recordPromotionFailedRef, {
+        promotionId: attempt.promotionId,
+        errorSummary: error instanceof Error ? error.message : String(error),
+        now: isoNow()
+      });
+
+      return { promotion: failed, preview };
+    }
   }
 });
 

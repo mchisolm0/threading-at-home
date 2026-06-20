@@ -401,6 +401,19 @@ li {
   gap: 14px;
 }
 
+.promotion-panel,
+.promotion-preview {
+  display: grid;
+  gap: 14px;
+}
+
+.promotion-controls {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  align-items: end;
+}
+
 .task-preview dl,
 .detail-list {
   display: grid;
@@ -747,6 +760,7 @@ li {
   .workspace-layout,
   .workspace-column.wide,
   .detail-grid,
+  .promotion-controls,
   .volunteer-layout,
   .volunteer-layout.secondary {
     grid-template-columns: 1fr;

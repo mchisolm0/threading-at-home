@@ -52,6 +52,17 @@ type GitHubPermissionPayload = {
   };
 };
 
+type GitHubCreatedIssueCommentPayload = {
+  readonly id?: unknown;
+  readonly html_url?: unknown;
+};
+
+type GitHubCreatedIssuePayload = {
+  readonly id?: unknown;
+  readonly number?: unknown;
+  readonly html_url?: unknown;
+};
+
 const repositoryFullNamePattern = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const textEncoder = new TextEncoder();
 
@@ -200,6 +211,89 @@ export function repositoryOwnerAndName(fullName: string): {
   const [owner, name] = normalized.split("/");
 
   return { owner, name, fullName: normalized };
+}
+
+export function buildGitHubIssueCommentRequest(input: {
+  readonly repositoryFullName: string;
+  readonly issueNumber: number;
+  readonly body: string;
+}): {
+  readonly method: "POST";
+  readonly url: string;
+  readonly body: string;
+} {
+  if (!Number.isInteger(input.issueNumber) || input.issueNumber < 1) {
+    throw new Error("GitHub issue comment request requires a positive issue number");
+  }
+
+  const repository = repositoryOwnerAndName(input.repositoryFullName);
+
+  return {
+    method: "POST",
+    url: `https://api.github.com/repos/${repository.owner}/${repository.name}/issues/${input.issueNumber}/comments`,
+    body: JSON.stringify({ body: input.body })
+  };
+}
+
+export function buildGitHubIssueRequest(input: {
+  readonly repositoryFullName: string;
+  readonly title: string;
+  readonly body: string;
+}): {
+  readonly method: "POST";
+  readonly url: string;
+  readonly body: string;
+} {
+  const title = input.title.trim();
+
+  if (title.length === 0) {
+    throw new Error("GitHub issue request requires a title");
+  }
+
+  const repository = repositoryOwnerAndName(input.repositoryFullName);
+
+  return {
+    method: "POST",
+    url: `https://api.github.com/repos/${repository.owner}/${repository.name}/issues`,
+    body: JSON.stringify({ title, body: input.body })
+  };
+}
+
+export function parseGitHubCreatedIssueComment(
+  payload: GitHubCreatedIssueCommentPayload
+): {
+  readonly githubId: string;
+  readonly url: string;
+} {
+  const githubId = asNumberOrString(payload.id);
+  const url = asString(payload.html_url);
+
+  if (githubId === undefined || url === undefined) {
+    throw new Error("GitHub issue comment response did not include id and html_url");
+  }
+
+  return { githubId, url };
+}
+
+export function parseGitHubCreatedIssue(
+  payload: GitHubCreatedIssuePayload
+): {
+  readonly githubId: string;
+  readonly number: number;
+  readonly url: string;
+} {
+  const githubId = asNumberOrString(payload.id);
+  const url = asString(payload.html_url);
+  const number =
+    typeof payload.number === "number" && Number.isSafeInteger(payload.number)
+      ? payload.number
+      : undefined;
+
+  if (githubId === undefined || number === undefined || url === undefined) {
+    throw new Error("GitHub issue response did not include id, number, and html_url");
+  }
+
+  return { githubId, number, url };
 }
 
 export function parseGitHubRepositoryPermission(

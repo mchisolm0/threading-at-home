@@ -1,5 +1,8 @@
 import { makeFunctionReference } from "convex/server";
 import type {
+  GitHubPromotionAttributionMode,
+  GitHubPromotionPreview,
+  GitHubPromotionTarget,
   ResultPackage,
   TaskRequest,
   VolunteerPolicy
@@ -37,6 +40,33 @@ export type GitHubInstallationView = {
   readonly repositoryFullNames: readonly string[];
   readonly status: string;
   readonly updatedAt: string;
+};
+
+export type PromotionRecordView = {
+  readonly promotionId: string;
+  readonly resultPackageId: string;
+  readonly projectId: string;
+  readonly taskRequestId: string;
+  readonly runId: string;
+  readonly targetKind: string;
+  readonly targetRepositoryFullName: string;
+  readonly targetIssueNumber?: number;
+  readonly targetIssueTitle?: string;
+  readonly attributionMode: string;
+  readonly previewTitle?: string;
+  readonly previewBody: string;
+  readonly status: string;
+  readonly targetUrl?: string;
+  readonly targetGitHubId?: string;
+  readonly errorSummary?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly postedAt?: string;
+};
+
+export type PromotionResultView = {
+  readonly promotion: PromotionRecordView;
+  readonly preview: GitHubPromotionPreview;
 };
 
 export type VolunteerProjectView = {
@@ -203,7 +233,27 @@ export const convexApi = {
       "action",
       { repositoryFullName: string },
       ProjectView
-    >("github:registerProject")
+    >("github:registerProject"),
+    previewResultPromotion: makeFunctionReference<
+      "query",
+      {
+        resultPackageId: string;
+        target: GitHubPromotionTarget;
+        attributionMode: GitHubPromotionAttributionMode;
+      },
+      GitHubPromotionPreview
+    >("github:previewResultPromotion"),
+    promoteResultToGitHub: makeFunctionReference<
+      "action",
+      {
+        resultPackageId: string;
+        target: GitHubPromotionTarget;
+        attributionMode: GitHubPromotionAttributionMode;
+        confirmedPreviewTitle?: string;
+        confirmedPreviewBody: string;
+      },
+      PromotionResultView
+    >("github:promoteResultToGitHub")
   },
   lifecycle: {
     myTasks: makeFunctionReference<
