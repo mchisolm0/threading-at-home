@@ -30,6 +30,15 @@ import {
   shouldExpireLease,
   shouldExpireStaleRun
 } from "./lifecycleLogic.js";
+import {
+  maintainerResultListPackageView,
+  maintainerResultPackageView,
+  maintainerRunView,
+  type MaintainerResultListPackage,
+  type MaintainerResultPackage,
+  type MaintainerRunInput,
+  type MaintainerRunView
+} from "./maintainerResultViews.js";
 
 type MutationCtx = GenericMutationCtx<GenericDataModel>;
 type QueryCtx = GenericQueryCtx<GenericDataModel>;
@@ -48,12 +57,46 @@ type VolunteerProjectSubscriptionIndexDocument = Record<
   string
 > &
   Record<string, Value>;
+type ProjectRepositoryView = {
+  readonly owner: string;
+  readonly name: string;
+  readonly fullName: string;
+  readonly defaultBranch?: string;
+};
+type MaintainerResultTaskSummary = {
+  readonly id: string;
+  readonly projectId: string;
+  readonly status: string;
+  readonly title: string;
+  readonly type: string;
+  readonly priority: string;
+  readonly updatedAt: string;
+};
+type MaintainerResultProjectView = {
+  readonly projectId: string;
+  readonly repository: ProjectRepositoryView;
+  readonly status: string;
+};
+type MaintainerResultListItem = {
+  readonly resultPackage: MaintainerResultListPackage;
+  readonly run: MaintainerRunView | null;
+  readonly task: MaintainerResultTaskSummary;
+  readonly project: MaintainerResultProjectView;
+};
+type MaintainerResultDetail = {
+  readonly resultPackage: MaintainerResultPackage;
+  readonly run: MaintainerRunView | null;
+  readonly task: TaskRequest;
+  readonly project: MaintainerResultProjectView;
+};
 
 const mutation = mutationGeneric;
 const internalMutation = internalMutationGeneric;
 const query = queryGeneric;
 const defaultCleanupBatchSize = 100;
 const maximumCleanupBatchSize = 500;
+const defaultMaintainerResultLimit = 50;
+const maximumMaintainerResultLimit = 100;
 const defaultStaleRunAgeMs = 60 * 60 * 1000;
 const nonTerminalCleanupStatuses = ["queued", "leased", "running"] as const;
 
@@ -213,6 +256,24 @@ function cleanupBatchSize(batchSize: number | undefined): number {
   return batchSize;
 }
 
+function maintainerResultLimit(limit: number | undefined): number {
+  if (limit === undefined) {
+    return defaultMaintainerResultLimit;
+  }
+
+  if (
+    !Number.isInteger(limit) ||
+    limit < 1 ||
+    limit > maximumMaintainerResultLimit
+  ) {
+    throw new Error(
+      `Result inbox limit must be an integer between 1 and ${maximumMaintainerResultLimit}`
+    );
+  }
+
+  return limit;
+}
+
 function toConvexValue(value: unknown): Value {
   if (
     value === null ||
@@ -257,6 +318,142 @@ function withoutSystemFields(doc: StoredDoc): Record<string, Value> {
   }
 
   return result;
+}
+
+function taskSummaryView(task: TaskRequest): MaintainerResultTaskSummary {
+  return {
+    id: task.id,
+    projectId: task.projectId,
+    status: task.status,
+    title: task.title,
+    type: task.type,
+    priority: task.priority,
+    updatedAt: task.updatedAt
+  };
+}
+
+function runView(
+  run: StoredDoc | null,
+  resultPackage: ResultPackage
+): MaintainerRunView | null {
+  if (run === null) {
+    return null;
+  }
+
+  const runInput = {
+    runId: String(run.runId),
+    taskRequestId: String(run.taskRequestId),
+    projectId: String(run.projectId),
+    leaseId: typeof run.leaseId === "string" ? run.leaseId : undefined,
+    runnerId: typeof run.runnerId === "string" ? run.runnerId : undefined,
+    status: String(run.status),
+    attempt: Number(run.attempt),
+    taskSnapshotHash:
+      typeof run.taskSnapshotHash === "string" ? run.taskSnapshotHash : undefined,
+    startedAt: typeof run.startedAt === "string" ? run.startedAt : undefined,
+    completedAt: typeof run.completedAt === "string" ? run.completedAt : undefined,
+    createdAt: String(run.createdAt),
+    updatedAt: String(run.updatedAt)
+  } satisfies MaintainerRunInput;
+
+  return maintainerRunView(runInput, resultPackage);
+}
+
+function repositoryView(value: Value): ProjectRepositoryView {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    value instanceof ArrayBuffer
+  ) {
+    throw new Error("Project repository is malformed");
+  }
+
+  const repository = value as Record<string, Value>;
+
+  return {
+    owner: String(repository.owner),
+    name: String(repository.name),
+    fullName: String(repository.fullName),
+    defaultBranch:
+      typeof repository.defaultBranch === "string" ? repository.defaultBranch : undefined
+  };
+}
+
+async function maintainerResultItem(
+  ctx: QueryCtx,
+  resultDoc: StoredDoc,
+  actorUserId: string
+): Promise<MaintainerResultDetail | null> {
+  const resultPackage = parseResultPackage(withoutSystemFields(resultDoc));
+  const [taskDoc, projectDoc, runDoc] = await Promise.all([
+    uniqueByIndex<StoredDoc>(
+      ctx,
+      "taskRequests",
+      "by_id",
+      "id",
+      resultPackage.taskRequestId
+    ),
+    uniqueByIndex<StoredDoc>(
+      ctx,
+      "projects",
+      "by_project_id",
+      "projectId",
+      resultPackage.projectId
+    ),
+    uniqueByIndex<StoredDoc>(
+      ctx,
+      "runs",
+      "by_run_id",
+      "runId",
+      resultPackage.runId
+    )
+  ]);
+
+  if (
+    taskDoc === null ||
+    projectDoc === null ||
+    projectDoc.createdByUserId !== actorUserId ||
+    projectDoc.status !== "verified"
+  ) {
+    return null;
+  }
+
+  const task = parseTaskRequest(withoutSystemFields(taskDoc));
+
+  if (task.createdByUserId !== actorUserId || task.projectId !== resultPackage.projectId) {
+    return null;
+  }
+
+  return {
+    resultPackage: maintainerResultPackageView(resultPackage),
+    run: runView(runDoc, resultPackage),
+    task,
+    project: {
+      projectId: String(projectDoc.projectId),
+      repository: repositoryView(projectDoc.repository),
+      status: String(projectDoc.status)
+    }
+  };
+}
+
+async function maintainerResultListItem(
+  ctx: QueryCtx,
+  resultDoc: StoredDoc,
+  actorUserId: string
+): Promise<MaintainerResultListItem | null> {
+  const item = await maintainerResultItem(ctx, resultDoc, actorUserId);
+
+  if (item === null) {
+    return null;
+  }
+
+  return {
+    resultPackage: maintainerResultListPackageView(item.resultPackage),
+    run: item.run,
+    task: taskSummaryView(item.task),
+    project: item.project
+  };
 }
 
 async function activeLeaseCountForTask(
@@ -612,6 +809,74 @@ export const taskDetail = query({
     await requireMaintainerProject(ctx, parsedTask.projectId, actor.userId);
 
     return parsedTask;
+  }
+});
+
+export const maintainerResults = query({
+  args: {
+    projectId: v.optional(v.string()),
+    limit: v.optional(v.number())
+  },
+  handler: async (ctx, args) => {
+    const actor = await requireAuthenticatedUser(ctx);
+    const limit = maintainerResultLimit(args.limit);
+    const projectDocs = await collectByIndex<StoredDoc>(
+      ctx,
+      "projects",
+      "by_created_by",
+      "createdByUserId",
+      actor.userId
+    );
+    const verifiedProjectIds = projectDocs
+      .filter(
+        (project) =>
+          project.status === "verified" &&
+          (args.projectId === undefined || project.projectId === args.projectId)
+      )
+      .map((project) => String(project.projectId));
+    const items: MaintainerResultListItem[] = [];
+
+    for (const projectId of verifiedProjectIds) {
+      const resultDocs = (await ctx.db
+        .query("resultPackages")
+        .withIndex("by_project_completed_at", (q) => q.eq("projectId", projectId))
+        .order("desc")
+        .take(limit)) as StoredDoc[];
+
+      for (const resultDoc of resultDocs) {
+        const item = await maintainerResultListItem(ctx, resultDoc, actor.userId);
+
+        if (item !== null) {
+          items.push(item);
+        }
+      }
+    }
+
+    return items.sort((left, right) =>
+      right.resultPackage.completedAt.localeCompare(left.resultPackage.completedAt)
+    ).slice(0, limit);
+  }
+});
+
+export const resultDetail = query({
+  args: {
+    resultPackageId: v.string()
+  },
+  handler: async (ctx, args): Promise<MaintainerResultDetail | null> => {
+    const actor = await requireAuthenticatedUser(ctx);
+    const resultDoc = await uniqueByIndex<StoredDoc>(
+      ctx,
+      "resultPackages",
+      "by_result_package_id",
+      "resultPackageId",
+      args.resultPackageId
+    );
+
+    if (resultDoc === null) {
+      return null;
+    }
+
+    return await maintainerResultItem(ctx, resultDoc, actor.userId);
   }
 });
 
