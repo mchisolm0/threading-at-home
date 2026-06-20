@@ -444,7 +444,7 @@ function validateIsolatedCommand(argv: readonly string[]): void {
 function isExcludedSnapshotName(name: string): boolean {
   return (
     excludedSnapshotNames.has(name) ||
-    name.startsWith(".env.") ||
+    name.startsWith(".env") ||
     name.endsWith(".pem")
   );
 }

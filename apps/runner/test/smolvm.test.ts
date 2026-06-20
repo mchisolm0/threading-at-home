@@ -119,6 +119,8 @@ describe("smolvm runner isolation helpers", () => {
     await writeFile(join(root, "src", "index.ts"), "export const ok = true;\n");
     await writeFile(join(root, ".env"), "TOKEN=sk-secret123456789\n");
     await writeFile(join(root, ".env.test"), "TOKEN=sk-secret123456789\n");
+    await writeFile(join(root, ".envrc"), "TOKEN=sk-secret123456789\n");
+    await writeFile(join(root, ".env-secret"), "TOKEN=sk-secret123456789\n");
     await writeFile(join(root, ".git", "config"), "secret\n");
     await writeFile(join(root, ".codex", "auth.json"), "{}\n");
     await writeFile(join(root, "node_modules", "pkg", "index.js"), "module.exports = 1;\n");
@@ -131,6 +133,8 @@ describe("smolvm runner isolation helpers", () => {
     );
     await expect(stat(join(snapshot.path, ".env"))).rejects.toThrow();
     await expect(stat(join(snapshot.path, ".env.test"))).rejects.toThrow();
+    await expect(stat(join(snapshot.path, ".envrc"))).rejects.toThrow();
+    await expect(stat(join(snapshot.path, ".env-secret"))).rejects.toThrow();
     await expect(stat(join(snapshot.path, ".git"))).rejects.toThrow();
     await expect(stat(join(snapshot.path, ".codex"))).rejects.toThrow();
     await expect(stat(join(snapshot.path, "node_modules"))).rejects.toThrow();
