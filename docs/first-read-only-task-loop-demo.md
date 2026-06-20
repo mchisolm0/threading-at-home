@@ -58,7 +58,7 @@ Open `http://localhost:3000`, sign in with GitHub, and open the dashboard.
 9. In `Volunteer opt-in`, click `Opt in` for the maintainer project.
 10. In `Setup tokens`, create a token and copy the displayed one-time token.
 
-Task 5.2 intentionally skips leasing when `Review before upload` is enabled. The future local review-before-upload workflow is out of scope for this demo.
+This demo intentionally skips leasing when `Review before upload` is enabled. The future local review-before-upload workflow is out of scope for this demo.
 
 ## Runner Script
 
