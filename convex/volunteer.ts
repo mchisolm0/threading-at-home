@@ -16,7 +16,9 @@ import {
 import { v, type GenericId, type Value } from "convex/values";
 
 import {
+  assertRunnerAuthTokenHashMatches,
   assertRunnerSetupTokenCanBeExchanged,
+  normalizeRunnerAuthTokenHash,
   normalizeRunnerSetupTokenHash
 } from "./volunteerLogic.js";
 
@@ -79,6 +81,21 @@ type RunnerRegistrationView = {
   readonly maxOutputBytes: number;
   readonly registeredAt: string;
   readonly lastSeenAt: string;
+};
+type RunnerConfigurationSubscriptionView = {
+  readonly projectId: string;
+  readonly repository: ProjectDoc["repository"];
+  readonly enabled: boolean;
+  readonly taskTypeAllowlist: readonly string[];
+  readonly maxSandbox: string;
+  readonly allowNetwork: boolean;
+  readonly allowPatches: boolean;
+  readonly updatedAt: string;
+};
+type RunnerConfigurationView = {
+  readonly runner: RunnerRegistrationView;
+  readonly policy: VolunteerPolicy | null;
+  readonly subscriptions: readonly RunnerConfigurationSubscriptionView[];
 };
 
 const query = queryGeneric;
@@ -208,7 +225,9 @@ function subscriptionView(subscription: VolunteerSubscriptionRecord) {
 }
 
 function runnerView(runner: StoredDoc): RunnerRegistrationView {
-  const parsed = parseRunnerCapability(withoutSystemFields(runner));
+  const capability = withoutSystemFields(runner);
+  delete capability.runnerAuthTokenHash;
+  const parsed = parseRunnerCapability(capability);
 
   return {
     runnerId: parsed.runnerId,
@@ -224,6 +243,67 @@ function runnerView(runner: StoredDoc): RunnerRegistrationView {
     maxOutputBytes: parsed.maxOutputBytes,
     registeredAt: parsed.registeredAt,
     lastSeenAt: parsed.lastSeenAt
+  };
+}
+
+async function runnerById(
+  ctx: QueryCtx | MutationCtx,
+  runnerId: string
+): Promise<StoredDoc | null> {
+  return (await ctx.db
+    .query("runnerRegistrations")
+    .withIndex("by_runner_id", (q) => q.eq("runnerId", runnerId))
+    .unique()) as StoredDoc | null;
+}
+
+function requireRunnerAuth(runner: StoredDoc, runnerAuthTokenHash: string): void {
+  assertRunnerAuthTokenHashMatches(
+    typeof runner.runnerAuthTokenHash === "string"
+      ? runner.runnerAuthTokenHash
+      : undefined,
+    runnerAuthTokenHash
+  );
+}
+
+async function runnerConfigurationView(
+  ctx: QueryCtx | MutationCtx,
+  runner: StoredDoc
+): Promise<RunnerConfigurationView> {
+  const volunteerUserId = runner.volunteerUserId;
+
+  if (typeof volunteerUserId !== "string") {
+    throw new Error("Runner registration is missing a volunteer owner");
+  }
+
+  const subscriptions = (await ctx.db
+    .query("volunteerProjectSubscriptions")
+    .withIndex("by_volunteer", (q) => q.eq("volunteerUserId", volunteerUserId))
+    .collect()) as VolunteerSubscriptionDoc[];
+  const views: RunnerConfigurationSubscriptionView[] = [];
+
+  for (const subscription of subscriptions) {
+    const project = await projectById(ctx, subscription.projectId);
+
+    if (project !== null) {
+      views.push({
+        projectId: subscription.projectId,
+        repository: project.repository,
+        enabled: subscription.enabled,
+        taskTypeAllowlist: subscription.taskTypeAllowlist,
+        maxSandbox: subscription.maxSandbox,
+        allowNetwork: subscription.allowNetwork,
+        allowPatches: subscription.allowPatches,
+        updatedAt: subscription.updatedAt
+      });
+    }
+  }
+
+  return {
+    runner: runnerView(runner),
+    policy: await volunteerPolicy(ctx, volunteerUserId),
+    subscriptions: views.sort((left, right) =>
+      left.projectId.localeCompare(right.projectId)
+    )
   };
 }
 
@@ -467,12 +547,14 @@ export const revokeRunnerSetupToken = mutation({
 export const exchangeRunnerSetupToken = mutation({
   args: {
     tokenHash: v.string(),
+    runnerAuthTokenHash: v.string(),
     runner: v.any(),
     now: v.string()
   },
   handler: async (ctx, args): Promise<RunnerRegistrationView> => {
     const now = requireIsoDateTime(args.now, "now");
     const tokenHash = normalizeRunnerSetupTokenHash(args.tokenHash);
+    const runnerAuthTokenHash = normalizeRunnerAuthTokenHash(args.runnerAuthTokenHash);
     const token = (await ctx.db
       .query("runnerSetupTokens")
       .withIndex("by_token_hash", (q) => q.eq("tokenHash", tokenHash))
@@ -500,10 +582,19 @@ export const exchangeRunnerSetupToken = mutation({
       throw new Error("Runner is already registered to another volunteer");
     }
 
+    let runnerRegistrationId: GenericId<string>;
+
     if (existingRunner === null) {
-      await ctx.db.insert("runnerRegistrations", toConvexDocument(runner));
+      runnerRegistrationId = await ctx.db.insert("runnerRegistrations", {
+        ...toConvexDocument(runner),
+        runnerAuthTokenHash
+      });
     } else {
-      await ctx.db.replace(existingRunner._id, toConvexDocument(runner));
+      runnerRegistrationId = existingRunner._id;
+      await ctx.db.replace(existingRunner._id, {
+        ...toConvexDocument(runner),
+        runnerAuthTokenHash
+      });
     }
 
     await ctx.db.patch(token._id, {
@@ -513,7 +604,71 @@ export const exchangeRunnerSetupToken = mutation({
 
     return runnerView({
       ...toConvexDocument(runner),
-      _id: existingRunner?._id ?? token._id
+      runnerAuthTokenHash,
+      _id: runnerRegistrationId
     } as StoredDoc);
+  }
+});
+
+export const heartbeatRunner = mutation({
+  args: {
+    runnerId: v.string(),
+    runnerAuthTokenHash: v.string(),
+    runner: v.any(),
+    now: v.string()
+  },
+  handler: async (ctx, args): Promise<RunnerRegistrationView> => {
+    const now = requireIsoDateTime(args.now, "now");
+    const existingRunner = await runnerById(ctx, args.runnerId);
+
+    if (existingRunner === null) {
+      throw new Error(`Runner registration not found: ${args.runnerId}`);
+    }
+
+    requireRunnerAuth(existingRunner, args.runnerAuthTokenHash);
+
+    if (typeof existingRunner.volunteerUserId !== "string") {
+      throw new Error("Runner registration is missing a volunteer owner");
+    }
+
+    const runner = parseRunnerCapability({
+      ...args.runner,
+      runnerId: existingRunner.runnerId,
+      volunteerUserId: existingRunner.volunteerUserId,
+      registeredAt: existingRunner.registeredAt,
+      lastSeenAt: now
+    });
+    const runnerAuthTokenHash = normalizeRunnerAuthTokenHash(
+      args.runnerAuthTokenHash
+    );
+
+    await ctx.db.replace(existingRunner._id, {
+      ...toConvexDocument(runner),
+      runnerAuthTokenHash
+    });
+
+    return runnerView({
+      ...toConvexDocument(runner),
+      runnerAuthTokenHash,
+      _id: existingRunner._id
+    } as StoredDoc);
+  }
+});
+
+export const runnerConfiguration = query({
+  args: {
+    runnerId: v.string(),
+    runnerAuthTokenHash: v.string()
+  },
+  handler: async (ctx, args): Promise<RunnerConfigurationView> => {
+    const runner = await runnerById(ctx, args.runnerId);
+
+    if (runner === null) {
+      throw new Error(`Runner registration not found: ${args.runnerId}`);
+    }
+
+    requireRunnerAuth(runner, args.runnerAuthTokenHash);
+
+    return await runnerConfigurationView(ctx, runner);
   }
 });

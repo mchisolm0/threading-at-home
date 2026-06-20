@@ -33,9 +33,15 @@ importers:
 
   apps/runner:
     dependencies:
+      '@oss-capacity/codex':
+        specifier: workspace:*
+        version: link:../../packages/codex
       '@oss-capacity/core':
         specifier: workspace:*
         version: link:../../packages/core
+      convex:
+        specifier: ^1.41.0
+        version: 1.41.0(react@19.2.7)
     devDependencies:
       tsx:
         specifier: ^4.20.3

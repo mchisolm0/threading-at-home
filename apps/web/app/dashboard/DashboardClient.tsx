@@ -1622,9 +1622,9 @@ export function DashboardClient() {
               <h2>Local setup</h2>
             </div>
             <pre className="prompt-block">
-              oss-capacity runner login --token &lt;setup-token&gt;{"\n"}
-              oss-capacity runner doctor{"\n"}
-              oss-capacity runner start
+              oss-capacity-runner login --broker-url &lt;convex-url&gt; --setup-token &lt;setup-token&gt;{"\n"}
+              oss-capacity-runner diagnose{"\n"}
+              oss-capacity-runner heartbeat
             </pre>
             <p className="muted">
               The login command uses the setup token to register this machine, then
