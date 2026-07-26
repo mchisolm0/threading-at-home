@@ -14,7 +14,7 @@
     "@convex-dev/auth": "^0.0.94",
     "@oss-capacity/core": "workspace:*",
     "convex": "^1.41.0",
-    "next": "^15.3.3",
+    "next": "^15.5.21",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },
