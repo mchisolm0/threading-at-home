@@ -10,7 +10,7 @@
     "typecheck": "next typegen && tsc --noEmit"
   },
   "dependencies": {
-    "@auth/core": "0.41.1",
+    "@auth/core": "0.41.3",
     "@convex-dev/auth": "^0.0.94",
     "@oss-capacity/core": "workspace:*",
     "convex": "^1.41.0",
